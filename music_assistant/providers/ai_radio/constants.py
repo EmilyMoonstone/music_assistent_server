@@ -218,6 +218,10 @@ MAX_JINGLES = 50
 # jingles are picked from Home Assistant's media folder, the one folder every install
 # shares with Music Assistant; browsing stops at its edge
 JINGLE_MEDIA_ROOT = "/media"
+# announcements only play http URLs, so a jingle is previewed through a short-lived link
+# on the stream server that serves just that one file
+JINGLE_PREVIEW_ROUTE = "/ai_radio/jingle_preview"
+JINGLE_PREVIEW_SECONDS = 120
 JINGLE_FILE_EXTENSIONS = frozenset(
     {".mp3", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".wav", ".aiff", ".aif", ".wma"}
 )
