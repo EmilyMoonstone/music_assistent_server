@@ -13,12 +13,14 @@ from music_assistant.helpers.countries import get_country_codes
 from music_assistant.helpers.datetime import host_timezone_name
 
 from .constants import (
+    CONF_BREAK_MEMORY,
     CONF_TIMEZONE,
     CONF_TTS_LOUDNESS_BOOST,
     CONF_WEATHER_CITY,
     CONF_WEATHER_COUNTRY,
     CONF_WEATHER_PROVIDER,
     CONF_WEATHER_TIMEOUT,
+    DEFAULT_BREAK_MEMORY,
     DEFAULT_TTS_LOUDNESS_BOOST,
     DEFAULT_WEATHER_PROVIDER,
     DEFAULT_WEATHER_TIMEOUT_SECONDS,
@@ -60,6 +62,11 @@ async def get_config_entries(
             type=ConfigEntryType.INTEGER,
             default_value=DEFAULT_WEATHER_TIMEOUT_SECONDS,
             advanced=True,
+        ),
+        ConfigEntry(
+            key=CONF_BREAK_MEMORY,
+            type=ConfigEntryType.BOOLEAN,
+            default_value=DEFAULT_BREAK_MEMORY,
         ),
         ConfigEntry(
             key=CONF_TTS_LOUDNESS_BOOST,

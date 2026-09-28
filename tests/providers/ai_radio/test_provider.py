@@ -392,6 +392,19 @@ async def test_save_section_leaves_the_stations_file_alone(provider: Any, tmp_pa
     assert provider._stations_file.read_text() == "untouched"
 
 
+@pytest.mark.asyncio
+async def test_delete_host_forgets_its_break_memory(provider: Any, tmp_path: Path) -> None:
+    """A deleted host leaves no memory behind, while other hosts keep theirs."""
+    provider._memory_file = tmp_path / "break_memory.json"
+    saved = await provider.save_host(await provider.host_template())
+    await provider._remember_break(saved["id"], "Transition", "Hello.", news=False)
+    await provider._remember_break("other_host", "Transition", "Evening.", news=False)
+
+    await provider.delete_host(saved["id"])
+
+    assert list(await provider.get_break_memory()) == ["other_host"]
+
+
 async def test_delete_host_refuses_when_station_references_it(provider: Any) -> None:
     """Refuse to delete a host that a station still references."""
     saved = await provider.save_host(await provider.host_template())
@@ -975,6 +988,7 @@ async def test_stations_are_played_by_everyone_and_edited_by_admins() -> None:
         "ai_radio/hosts/template",
         "ai_radio/hosts/presets/list",
         "ai_radio/engines/tts/list",
+        "ai_radio/memory/get",
         "ai_radio/stations/template",
         "ai_radio/stations/validate",
         "ai_radio/sections/template",
@@ -987,6 +1001,7 @@ async def test_stations_are_played_by_everyone_and_edited_by_admins() -> None:
         "ai_radio/sections/delete",
         "ai_radio/hosts/save",
         "ai_radio/hosts/delete",
+        "ai_radio/memory/clear",
     ):
         assert scopes[command] == Scope.CONFIG_PROVIDERS_WRITE
 

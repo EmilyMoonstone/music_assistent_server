@@ -44,7 +44,11 @@ from music_assistant.providers.ai_radio.constants import (
     ATTR_STATION_ID,
     ATTR_WEATHER_REQUIRED,
     ATTR_WEB_SEARCH_MODE,
+    BREAK_MEMORY_BREAKS_INSTRUCTION,
+    BREAK_MEMORY_EMPTY,
+    BREAK_MEMORY_NEWS_INSTRUCTION,
     CLIP_STREAMDETAILS_EXPIRATION,
+    CONF_BREAK_MEMORY,
     CONF_TTS_LOUDNESS_BOOST,
     DEFAULT_LLM_INSTRUCTIONS,
     MIN_LOUDNESS_REFERENCE_SECONDS,
@@ -53,11 +57,12 @@ from music_assistant.providers.ai_radio.constants import (
     TTS_PEAK_CEILING_DB,
     TTS_SPEECHNORM_FILTER,
 )
+from music_assistant.providers.ai_radio.memory import AIRadioMemoryMixin
 from music_assistant.providers.ai_radio.models import SessionState
 from music_assistant.providers.ai_radio.rendering import AIRadioRenderMixin
 
 
-class DummyRenderer(AIRadioRenderMixin):
+class DummyRenderer(AIRadioMemoryMixin, AIRadioRenderMixin):
     """Minimal harness exposing the render path."""
 
     domain = "ai_radio"
@@ -75,6 +80,8 @@ class DummyRenderer(AIRadioRenderMixin):
         self.fail_generation = False
         self.measure_calls: list[str] = []
         self.measured_loudness: float | None = None
+        self.break_memory_enabled = True
+        self.memory_writes = 0
 
     def _configured_now(self) -> Any:
         return __import__("datetime").datetime(2026, 7, 30, 18, 30)
@@ -89,6 +96,9 @@ class DummyRenderer(AIRadioRenderMixin):
             raise RuntimeError("llm down")
         self.llm_prompts.append(prompt)
         return "Good evening, it is warm out."
+
+    async def _write_break_memory(self) -> None:
+        self.memory_writes += 1
 
     async def _prepare_weather_tokens(self) -> dict[str, str]:
         self.weather_calls += 1
@@ -215,7 +225,9 @@ def _attach_normalization(
         assert key == CONF_VOLUME_NORMALIZATION_TARGET
         return target
 
-    def provider_setting(key: str) -> int:
+    def provider_setting(key: str) -> int | bool:
+        if key == CONF_BREAK_MEMORY:
+            return bool(cast("Any", renderer).break_memory_enabled)
         assert key == CONF_TTS_LOUDNESS_BOOST
         return boost
 
@@ -1146,3 +1158,124 @@ async def test_no_measurement_is_taken_when_the_reading_has_nowhere_to_go() -> N
     await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
 
     assert renderer.measure_calls == []
+
+
+async def test_a_rendered_break_is_shown_to_the_hosts_next_break() -> None:
+    """What a host aired reaches its next prompt, so it can avoid repeating itself."""
+    renderer = DummyRenderer()
+    first = _clip_item("sess_001", **{ATTR_HOST_ID: "mika"})
+    second = _clip_item("sess_002", **{ATTR_HOST_ID: "mika"})
+    _attach_queue(renderer, [first, second])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+    await renderer.get_stream_details("sess_002", MediaType.SOUND_EFFECT)
+
+    assert BREAK_MEMORY_BREAKS_INSTRUCTION not in renderer.llm_prompts[0]
+    assert BREAK_MEMORY_BREAKS_INSTRUCTION in renderer.llm_prompts[1]
+    assert "(Weather): Good evening, it is warm out." in renderer.llm_prompts[1]
+    assert BREAK_MEMORY_NEWS_INSTRUCTION not in renderer.llm_prompts[1]
+    assert renderer.memory_writes == 2
+
+
+async def test_break_memory_is_kept_per_host() -> None:
+    """A host never sees the breaks another host aired."""
+    renderer = DummyRenderer()
+    _attach_queue(
+        renderer,
+        [
+            _clip_item("sess_001", **{ATTR_HOST_ID: "mika"}),
+            _clip_item("sess_002", **{ATTR_HOST_ID: "night_owl"}),
+        ],
+    )
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+    await renderer.get_stream_details("sess_002", MediaType.SOUND_EFFECT)
+
+    assert BREAK_MEMORY_BREAKS_INSTRUCTION not in renderer.llm_prompts[1]
+
+
+async def test_a_news_break_sees_the_news_already_reported() -> None:
+    """A forced web search marks the news, and only the next news break is handed it."""
+    renderer = DummyRenderer()
+    news = {ATTR_HOST_ID: "mika", ATTR_WEB_SEARCH_MODE: "force"}
+    _attach_queue(
+        renderer,
+        [
+            _clip_item("sess_001", **news),
+            _clip_item("sess_002", **news),
+            _clip_item("sess_003", **{ATTR_HOST_ID: "mika"}),
+        ],
+    )
+
+    for clip_id in ("sess_001", "sess_002", "sess_003"):
+        await renderer.get_stream_details(clip_id, MediaType.SOUND_EFFECT)
+
+    assert BREAK_MEMORY_NEWS_INSTRUCTION in renderer.llm_prompts[1]
+    # the news is not a break to vary on, and a plain break has no use for the news
+    assert BREAK_MEMORY_BREAKS_INSTRUCTION not in renderer.llm_prompts[1]
+    assert BREAK_MEMORY_NEWS_INSTRUCTION not in renderer.llm_prompts[2]
+    assert [entry["news"] for entry in renderer._break_memory["mika"]] == [True, True, False]
+
+
+async def test_placed_memory_placeholders_are_filled_in_place() -> None:
+    """A prompt that places the memory itself gets exactly that, and nothing is appended."""
+    renderer = DummyRenderer()
+    placed = _clip_item(
+        "sess_002",
+        **{ATTR_HOST_ID: "mika", ATTR_PROMPT: "Said: <recent_breaks> | News: <recent_news>"},
+    )
+    _attach_queue(renderer, [_clip_item("sess_001", **{ATTR_HOST_ID: "mika"}), placed])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+    await renderer.get_stream_details("sess_002", MediaType.SOUND_EFFECT)
+
+    prompt = renderer.llm_prompts[1]
+    assert prompt.startswith("Said: - ")
+    assert "Good evening, it is warm out." in prompt
+    assert prompt.endswith(f"| News: {BREAK_MEMORY_EMPTY}")
+    assert BREAK_MEMORY_BREAKS_INSTRUCTION not in prompt
+    # asking for the news it already told makes the break a news break
+    assert renderer._break_memory["mika"][-1]["news"] is True
+
+
+async def test_disabled_break_memory_still_fills_placed_placeholders() -> None:
+    """Turning the memory off stops the automatic reminder, not a placeholder placed on purpose."""
+    renderer = DummyRenderer()
+    renderer.break_memory_enabled = False
+    _attach_queue(
+        renderer,
+        [
+            _clip_item("sess_001", **{ATTR_HOST_ID: "mika"}),
+            _clip_item("sess_002", **{ATTR_HOST_ID: "mika"}),
+            _clip_item("sess_003", **{ATTR_HOST_ID: "mika", ATTR_PROMPT: "<recent_breaks>"}),
+        ],
+    )
+
+    for clip_id in ("sess_001", "sess_002", "sess_003"):
+        await renderer.get_stream_details(clip_id, MediaType.SOUND_EFFECT)
+
+    assert BREAK_MEMORY_BREAKS_INSTRUCTION not in renderer.llm_prompts[1]
+    assert "Good evening, it is warm out." in renderer.llm_prompts[2]
+
+
+async def test_a_clip_without_a_host_is_not_remembered() -> None:
+    """Memory is kept per host, so a clip nobody speaks leaves none behind."""
+    renderer = DummyRenderer()
+    _attach_queue(renderer, [_clip_item("sess_001")])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert renderer.memory_writes == 0
+    assert not getattr(renderer, "_break_memory", {})
+
+
+async def test_a_failed_generation_is_not_remembered() -> None:
+    """Only a script that airs becomes part of the memory."""
+    renderer = DummyRenderer()
+    renderer.fail_generation = True
+    _attach_queue(renderer, [_clip_item("sess_001", **{ATTR_HOST_ID: "mika"})])
+
+    with pytest.raises(MediaNotFoundError):
+        await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert renderer.memory_writes == 0

@@ -36,6 +36,7 @@ from .constants import (
 )
 from .helpers import check_player_access, has_player_access, utc_now_iso
 from .hosts import AIRadioHostsMixin
+from .memory import AIRadioMemoryMixin
 from .models import DJQueueState, SessionState
 from .queue_dj import AIRadioQueueDJMixin
 from .rendering import AIRadioRenderMixin
@@ -61,6 +62,7 @@ async def setup(
 class AIRadioProvider(
     AIRadioRuntimeMixin,
     AIRadioRenderMixin,
+    AIRadioMemoryMixin,
     AIRadioHostsMixin,
     AIRadioQueueDJMixin,
     AIRadioStorageMixin,
@@ -93,6 +95,7 @@ class AIRadioProvider(
         self._sections_file = self._storage_dir / "sections.json"
         self._hosts_file = self._storage_dir / "hosts.json"
         self._dj_file = self._storage_dir / "queue_dj.json"
+        self._memory_file = self._storage_dir / "break_memory.json"
 
     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
         """Return Config entries to configure this provider."""
@@ -109,6 +112,7 @@ class AIRadioProvider(
         # after loading, so a v2 stations file has had its chance to migrate its own hosts
         await self._seed_preset_hosts()
         await self._load_queue_dj()
+        await self._load_break_memory()
         await self._wait_for_engines()
         self.logger.info(
             "AI Radio initialized for instance '%s' with %d stations, %d hosts and %d sections",
@@ -139,6 +143,8 @@ class AIRadioProvider(
             ("ai_radio/hosts/template", self.host_template),
             ("ai_radio/hosts/presets/list", self.list_host_presets),
             ("ai_radio/engines/tts/list", self.list_tts_engines),
+            ("ai_radio/memory/get", self.get_break_memory),
+            ("ai_radio/memory/clear", self.clear_break_memory),
             ("ai_radio/start", self.start_run),
             ("ai_radio/stop", self.stop_run),
             ("ai_radio/status", self.get_status),
@@ -352,6 +358,7 @@ class AIRadioProvider(
                 )
             self._hosts.pop(host_id)
             await self._write_hosts()
+            await self.clear_break_memory(host_id)
         self.logger.info("AI Radio host deleted: %s", host_id)
 
     async def host_template(self) -> dict[str, Any]:

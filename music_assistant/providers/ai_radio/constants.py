@@ -8,6 +8,7 @@ from music_assistant_models.enums import ContentType
 from music_assistant_models.media_items import AudioFormat
 
 CONF_AI_ENGINE = "ai_engine"
+CONF_BREAK_MEMORY = "break_memory"
 CONF_TTS_ENGINE = "tts_engine"
 CONF_TTS_LOUDNESS_BOOST = "tts_loudness_boost"
 CONF_TIMEZONE = "timezone"
@@ -132,6 +133,35 @@ WEATHER_PLACEHOLDER_TOKENS = ("<weather_hourly>", "<weather_daily>")
 # substituted for an unresolved weather token in clips that still air
 NO_WEATHER_DATA_INSTRUCTION = (
     "(no weather data available - leave out all weather talk, do not invent a forecast)"
+)
+
+# every break is written fresh by the LLM, which on its own drifts back to the same obvious
+# angle each time. The breaks a host aired are remembered and fed back into its later prompts
+DEFAULT_BREAK_MEMORY = True
+RECENT_BREAKS_PLACEHOLDER = "<recent_breaks>"
+RECENT_NEWS_PLACEHOLDER = "<recent_news>"
+BREAK_MEMORY_PLACEHOLDERS = (RECENT_BREAKS_PLACEHOLDER, RECENT_NEWS_PLACEHOLDER)
+# how many of a host's latest breaks a prompt sees, and how far back its news reaches
+RECENT_BREAKS_IN_PROMPT = 8
+RECENT_NEWS_WINDOW_HOURS = 12
+# what is kept per host: enough to cover the news window of a chatty host, while a break
+# from days ago says nothing about what sounds repetitive now
+BREAK_MEMORY_MAX_BREAKS = 30
+BREAK_MEMORY_MAX_NEWS = 30
+BREAK_MEMORY_RETENTION_HOURS = 48
+# a remembered break only has to carry its topic and phrasing, not the whole script
+BREAK_MEMORY_BREAK_CHARS = 350
+BREAK_MEMORY_NEWS_CHARS = 700
+BREAK_MEMORY_EMPTY = "(nothing yet)"
+BREAK_MEMORY_BREAKS_INSTRUCTION = (
+    "What you said in your most recent breaks on air, oldest first. Do not repeat "
+    "their topics, angles, images, jokes, openings, sign-offs or signature phrases, and do "
+    "not start the same way. Find a fresh angle:"
+)
+BREAK_MEMORY_NEWS_INSTRUCTION = (
+    "News you already reported in the last hours, oldest first. Pick other stories. Only "
+    "return to one of these when there is a genuinely new development, and then present it "
+    "as an update:"
 )
 
 # HA drops a tts_proxy token 60s after its last use at the lowest configurable time_memory

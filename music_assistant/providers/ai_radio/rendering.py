@@ -51,6 +51,7 @@ from .constants import (
     MIN_CLIP_MEDIA_LIFETIME,
     MIN_LOUDNESS_REFERENCE_SECONDS,
     NO_WEATHER_DATA_INSTRUCTION,
+    RECENT_NEWS_PLACEHOLDER,
     TTS_CLIP_PCM_FORMAT,
     TTS_PEAK_CEILING_DB,
     TTS_SERVER_ERROR_MARKERS,
@@ -317,11 +318,15 @@ class AIRadioRenderMixin:
         resolved = prompt
         for key, value in deferred.items():
             resolved = resolved.replace(key, value)
-        host = self._hosts.get(str(attributes.get(ATTR_HOST_ID) or "")) or {}
+        host_id = str(attributes.get(ATTR_HOST_ID) or "")
+        host = self._hosts.get(host_id) or {}
         instructions = str(host.get("instructions") or "")
         language = str(host.get("language") or "")
         max_chars = int(attributes.get(ATTR_MAX_CHARS) or 0)
         web_mode = str(attributes.get(ATTR_WEB_SEARCH_MODE) or "disabled")
+        # a section that has to search the web is the news, as is one asking what it reported
+        news = web_mode == "force" or RECENT_NEWS_PLACEHOLDER in prompt
+        resolved = self._apply_break_memory(resolved, host_id, news=news)
         try:
             text = cast(
                 "str",
@@ -343,6 +348,8 @@ class AIRadioRenderMixin:
         self.logger.debug(
             "AI Radio clip %s (%s) rendered: %d chars", clip_id, queue_item.name, len(text)
         )
+        # rendering runs just in time, so a script that renders is one that is about to air
+        await self._remember_break(host_id, queue_item.name, text, news=news)
         return text
 
     async def _resolve_deferred_placeholders(self, prompt: str) -> dict[str, str]:

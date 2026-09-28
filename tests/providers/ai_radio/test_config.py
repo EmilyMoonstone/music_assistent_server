@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from music_assistant_models.config_entries import Config
+from music_assistant_models.enums import ConfigEntryType
 
 from music_assistant.providers.ai_radio.config import get_config_entries
 from music_assistant.providers.ai_radio.provider import AIRadioProvider
@@ -143,3 +144,13 @@ def test_weather_country_falls_back_to_the_locale_region_without_a_setup_answer(
 
     entry = next(e for e in entries if e.key == "weather_country")
     assert entry.default_value == "NL"
+
+
+def test_break_memory_is_a_visible_switch_that_defaults_on() -> None:
+    """Avoiding repeated breaks is on out of the box and can be switched off in the settings."""
+    entries = asyncio.run(get_config_entries(_make_mass("http://localhost:8095")))
+
+    entry = next(entry for entry in entries if entry.key == "break_memory")
+    assert entry.type == ConfigEntryType.BOOLEAN
+    assert entry.default_value is True
+    assert entry.advanced is False
