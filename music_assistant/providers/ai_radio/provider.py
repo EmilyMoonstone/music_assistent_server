@@ -21,19 +21,23 @@ from music_assistant.helpers.plugin_engines import (
     select_ai_engine,
     select_tts_engine,
 )
+from music_assistant.helpers.tags import async_parse_tags
 from music_assistant.models.plugin import PluginProvider
 
 from .constants import (
     CONF_AI_ENGINE,
     CONF_TTS_ENGINE,
     DEFAULT_MAX_CONCURRENT_RUNS,
+    EFFECT_BUILTIN_JINGLE,
     ENGINE_DISCOVERY_TIMEOUT,
     ENGINE_RECHECK_GRACE,
     ENGINE_RETRY_DELAY,
+    LOUDNESS_MEASURE_TIMEOUT,
     MAX_FINISHED_SESSIONS,
     SUPPORTED_FEATURES,
     TRANSLATION_OWNER,
 )
+from .effects import is_valid_source, jingle_text_from_lyrics, resolve_source
 from .helpers import check_player_access, has_player_access, utc_now_iso
 from .hosts import AIRadioHostsMixin
 from .memory import AIRadioMemoryMixin
@@ -145,6 +149,7 @@ class AIRadioProvider(
             ("ai_radio/engines/tts/list", self.list_tts_engines),
             ("ai_radio/memory/get", self.get_break_memory),
             ("ai_radio/memory/clear", self.clear_break_memory),
+            ("ai_radio/jingles/inspect", self.inspect_jingle),
             ("ai_radio/start", self.start_run),
             ("ai_radio/stop", self.stop_run),
             ("ai_radio/status", self.get_status),
@@ -364,6 +369,25 @@ class AIRadioProvider(
             await self._write_hosts()
             await self.clear_break_memory(host_id)
         self.logger.info("AI Radio host deleted: %s", host_id)
+
+    async def inspect_jingle(self, source: str) -> dict[str, Any]:
+        """
+        Return what a jingle carries: how long it runs, its title and the words it says.
+
+        The words come from the file's lyrics tag, which tools like Suno fill in.
+
+        :param source: The built-in gong, or the file path or URL of the jingle.
+        """
+        source = source.strip()
+        if source != EFFECT_BUILTIN_JINGLE and not is_valid_source(source):
+            raise InvalidDataError("A jingle must be an absolute file path or an http(s) URL")
+        async with asyncio.timeout(LOUDNESS_MEASURE_TIMEOUT):
+            tags = await async_parse_tags(resolve_source(source), require_duration=True)
+        return {
+            "duration": tags.duration,
+            "title": tags.title or "",
+            "text": jingle_text_from_lyrics(tags.lyrics),
+        }
 
     async def host_template(self) -> dict[str, Any]:
         """Return a default host template."""

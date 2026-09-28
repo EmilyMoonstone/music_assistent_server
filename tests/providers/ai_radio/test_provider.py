@@ -396,11 +396,14 @@ async def test_save_section_leaves_the_stations_file_alone(provider: Any, tmp_pa
 async def test_a_saved_host_keeps_its_effects(provider: Any) -> None:
     """Effects are stored with the host, and invalid sources are refused."""
     template = await provider.host_template()
-    template["effects"] = {"news_jingle": "builtin", "music_bed": "/media/bed.mp3"}
+    template["effects"] = {
+        "jingles": [{"source": "builtin", "tags": ["news"]}],
+        "music_bed": "/media/bed.mp3",
+    }
 
     saved = await provider.save_host(template)
 
-    assert saved["effects"]["news_jingle"] == "builtin"
+    assert saved["effects"]["jingles"] == [{"source": "builtin", "tags": ["news"], "text": ""}]
     assert saved["effects"]["music_bed"] == "/media/bed.mp3"
     template["effects"] = {"music_bed": "bed.mp3"}
     with pytest.raises(InvalidDataError):
@@ -408,10 +411,37 @@ async def test_a_saved_host_keeps_its_effects(provider: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_inspecting_a_jingle_reads_its_words_from_the_lyrics(
+    provider: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The words a Suno jingle says come back without its cue marks."""
+
+    async def fake_parse_tags(path: str, **_kwargs: Any) -> Any:
+        assert path == "/media/ai_radio/floskeln.mp3"
+        return SimpleNamespace(
+            duration=9.29,
+            title="Keine Floskeln",
+            lyrics="[Spoken, dry] Keine Floskeln. Mika am Mikro. [End]",
+        )
+
+    monkeypatch.setattr(ai_radio_provider, "async_parse_tags", fake_parse_tags)
+
+    info = await provider.inspect_jingle(" /media/ai_radio/floskeln.mp3 ")
+
+    assert info == {
+        "duration": 9.29,
+        "title": "Keine Floskeln",
+        "text": "Keine Floskeln. Mika am Mikro.",
+    }
+    with pytest.raises(InvalidDataError):
+        await provider.inspect_jingle("floskeln.mp3")
+
+
+@pytest.mark.asyncio
 async def test_a_client_unaware_of_effects_does_not_wipe_them(provider: Any) -> None:
     """Saving a host without any effects key keeps the effects it already had."""
     template = await provider.host_template()
-    template["effects"] = {"show_jingle": "builtin"}
+    template["effects"] = {"jingles": [{"source": "builtin", "tags": ["intro"]}]}
     await provider.save_host(template)
     del template["effects"]
     template["name"] = "Renamed"
@@ -419,7 +449,7 @@ async def test_a_client_unaware_of_effects_does_not_wipe_them(provider: Any) -> 
     saved = await provider.save_host(template)
 
     assert saved["name"] == "Renamed"
-    assert saved["effects"]["show_jingle"] == "builtin"
+    assert saved["effects"]["jingles"][0]["tags"] == ["intro"]
 
 
 @pytest.mark.asyncio
@@ -1032,6 +1062,8 @@ async def test_stations_are_played_by_everyone_and_edited_by_admins() -> None:
         "ai_radio/hosts/save",
         "ai_radio/hosts/delete",
         "ai_radio/memory/clear",
+        # probes a path on the server, so it is reserved for those who configure the plugin
+        "ai_radio/jingles/inspect",
     ):
         assert scopes[command] == Scope.CONFIG_PROVIDERS_WRITE
 

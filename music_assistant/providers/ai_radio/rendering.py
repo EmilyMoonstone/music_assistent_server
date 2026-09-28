@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -38,6 +39,7 @@ from music_assistant.helpers.tts import (
 
 from .constants import (
     ATTR_HOST_ID,
+    ATTR_JINGLE,
     ATTR_MAX_CHARS,
     ATTR_PROMPT,
     ATTR_RENDERED_TEXT,
@@ -52,7 +54,6 @@ from .constants import (
     DEFAULT_TTS_LOUDNESS_BOOST,
     DEFERRED_PLACEHOLDERS,
     EFFECT_MEASURE_SECONDS,
-    EFFECT_SOURCE_KEYS,
     LOUDNESS_MEASURE_TIMEOUT,
     MIN_CLIP_MEDIA_LIFETIME,
     MIN_LOUDNESS_REFERENCE_SECONDS,
@@ -69,8 +70,12 @@ from .effects import (
     EffectSound,
     dressed_duration,
     effect_filters,
-    jingle_source,
+    jingle_candidates,
+    jingle_choice_prompt,
+    jingle_occasion,
+    pick_jingle,
     resolve_source,
+    take_jingle_choice,
 )
 from .helpers import coerce_float, coerce_int, format_ai_radio_timestamp, soft_limit_text
 
@@ -124,6 +129,7 @@ class AIRadioRenderMixin:
     _media_cache: dict[str, _CachedClipMedia]
     _engine_loudness: dict[tuple[str, str, str], float]
     _effect_assets: dict[str, tuple[float, float]]
+    _last_jingles: dict[str, str]
 
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """
@@ -351,6 +357,11 @@ class AIRadioRenderMixin:
         web_mode = str(attributes.get(ATTR_WEB_SEARCH_MODE) or "disabled")
         news = _is_news_clip(queue_item)
         resolved = self._apply_break_memory(resolved, host_id, news=news)
+        effects = host.get("effects") or {}
+        jingles = self._jingle_candidates(queue_item, host_id, effects, news, prompt)
+        ask_llm = bool(jingles) and effects.get("jingle_selection") == "ai"
+        if ask_llm:
+            resolved = f"{resolved}\n\n{jingle_choice_prompt(jingles)}"
         try:
             text = cast(
                 "str",
@@ -367,6 +378,14 @@ class AIRadioRenderMixin:
             )
             self._record_skip(queue_item, f"generation failed: {err}")
             raise MediaNotFoundError(f"AI Radio clip {clip_id} failed to generate") from err
+        jingle: dict[str, Any] | None = None
+        if ask_llm:
+            jingle, text = take_jingle_choice(text, jingles)
+        if jingles and jingle is None:
+            jingle = pick_jingle(jingles, self._next_track_genres(queue_item))
+        attributes[ATTR_JINGLE] = jingle["source"] if jingle else ""
+        if jingle:
+            self._last_jingles_by_host()[host_id] = jingle["source"]
         if max_chars > 0:
             text = soft_limit_text(text, max_chars=max_chars)
         self.logger.debug(
@@ -509,9 +528,8 @@ class AIRadioRenderMixin:
         if not _has_effects(host):
             return None
         effects = host["effects"]
-        jingle_path = jingle_source(
-            effects, _is_news_clip(queue_item), str(attributes.get(ATTR_SLOT_WHEN) or "")
-        )
+        # the jingle was picked together with the script, so a replay airs the same one
+        jingle_path = resolve_source(str(attributes.get(ATTR_JINGLE) or ""))
         bed_path = resolve_source(str(effects.get("music_bed") or ""))
         if not jingle_path and not bed_path:
             return None
@@ -525,6 +543,42 @@ class AIRadioRenderMixin:
         if jingle is None and bed is None:
             return None
         return ClipEffects(jingle=jingle, bed=bed)
+
+    def _jingle_candidates(
+        self,
+        queue_item: QueueItem,
+        host_id: str,
+        effects: dict[str, Any],
+        news: bool,
+        prompt: str,
+    ) -> list[dict[str, Any]]:
+        """Return the jingles this break may open with, empty when it opens without one."""
+        if not effects.get("jingles"):
+            return []
+        weather = any(token in prompt for token in WEATHER_PLACEHOLDER_TOKENS)
+        slot_when = str(queue_item.extra_attributes.get(ATTR_SLOT_WHEN) or "")
+        occasion = jingle_occasion(news, weather, slot_when)
+        # news, weather and a show's ends always get theirs, a plain transition only now and then
+        chance = coerce_int(effects.get("jingle_chance"), 0)
+        if occasion == "transition" and random.random() * 100 >= chance:
+            return []
+        last = self._last_jingles_by_host().get(host_id, "")
+        return jingle_candidates(effects, occasion, self._configured_now().hour, last)
+
+    def _next_track_genres(self, queue_item: QueueItem) -> set[str]:
+        """Return the lowercase genres of the track after a clip, empty when unknown."""
+        next_item = self.mass.player_queues.get_next_item(
+            queue_item.queue_id, queue_item.queue_item_id
+        )
+        media_item = next_item.media_item if next_item is not None else None
+        genres = media_item.metadata.genres if media_item is not None else None
+        return {genre.lower() for genre in genres or ()}
+
+    def _last_jingles_by_host(self) -> dict[str, str]:
+        """Return the jingle each host played last, creating the record on first use."""
+        if not hasattr(self, "_last_jingles"):
+            self._last_jingles = {}
+        return self._last_jingles
 
     async def _effect_sound(self, path: str, target: float) -> EffectSound | None:
         """
@@ -602,4 +656,4 @@ def _is_news_clip(queue_item: QueueItem) -> bool:
 def _has_effects(host: dict[str, Any]) -> bool:
     """Return whether a host dresses its breaks with any sound."""
     effects = host.get("effects") or {}
-    return any(effects.get(key) for key in EFFECT_SOURCE_KEYS)
+    return bool(effects.get("jingles") or effects.get("music_bed"))

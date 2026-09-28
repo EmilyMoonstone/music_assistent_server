@@ -123,6 +123,8 @@ ATTR_QUEUE_DJ = "ai_radio_queue_dj"
 ATTR_GAP_NEXT_ID = "ai_radio_gap_next_id"
 ATTR_WEATHER_REQUIRED = "ai_radio_weather_required"
 ATTR_SLOT_WHEN = "ai_radio_slot_when"
+# the jingle picked for a clip when its script was written, "" for none
+ATTR_JINGLE = "ai_radio_jingle"
 
 # placeholders resolved at render time rather than at plan time, so the aired script
 # reflects the moment it plays
@@ -165,13 +167,34 @@ BREAK_MEMORY_NEWS_INSTRUCTION = (
     "as an update:"
 )
 
-# a host can dress its breaks with sound: a jingle ahead of the news, one ahead of the intro
-# and sign-off of a show, and a music bed under everything it says. A jingle is either the
-# gong Music Assistant ships, or like a bed a file path or URL the user supplies
+# a host can dress its breaks with sound: jingles from its own library ahead of them, and a
+# music bed under everything it says. A jingle is either the gong Music Assistant ships, or
+# like a bed a file path or URL the user supplies
 EFFECT_BUILTIN_JINGLE = "builtin"
-EFFECT_SOURCE_KEYS = ("news_jingle", "show_jingle", "music_bed")
-# slots a show jingle plays in, the moments a real station would play its ident
-SHOW_JINGLE_SLOTS = frozenset({"start_of_playlist", "end_of_playlist"})
+# the occasions a jingle can be tagged for; a jingle tagged for none of them is general
+JINGLE_OCCASION_TAGS = ("general", "news", "weather", "intro", "outro")
+# the time-of-day tags, each with the local hours [start, end) it covers
+JINGLE_TIME_TAGS: dict[str, tuple[int, int]] = {
+    "morning": (5, 10),
+    "daytime": (10, 17),
+    "evening": (17, 22),
+    "late_night": (22, 5),
+}
+# the slot each show jingle occasion airs in
+JINGLE_SLOT_OCCASIONS = {"start_of_playlist": "intro", "end_of_playlist": "outro"}
+# how often a plain transition opens with a jingle, in percent
+DEFAULT_JINGLE_CHANCE = 20
+JINGLE_SELECTION_MODES = ("ai", "random")
+DEFAULT_JINGLE_SELECTION = "ai"
+MAX_JINGLES = 50
+MAX_JINGLE_TEXT_CHARS = 300
+# the LLM that writes a break also picks its jingle, answering on a line of its own
+JINGLE_CHOICE_INSTRUCTION = (
+    "A jingle plays right before you speak. Pick the one that fits this moment best "
+    "(time of day, the music around it, what the jingle says). Start your reply with a line "
+    "'JINGLE: <number>' and write the script after it. You may pick up on the jingle's words, "
+    "but do not repeat them. The options:"
+)
 # how far below the voice the bed sits, in dB
 DEFAULT_MUSIC_BED_LEVEL = -18
 MUSIC_BED_LEVEL_RANGE = (-40, -6)
