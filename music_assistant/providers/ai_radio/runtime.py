@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import logging
 import random
 import time
@@ -37,6 +38,7 @@ from music_assistant.helpers.plugin_engines import resolve_ai_engine, resolve_tt
 from music_assistant.helpers.uri import create_uri
 
 from .constants import (
+    AI_ORDER_REPLY_INSTRUCTION,
     AI_QUERY_TIMEOUT_SECONDS,
     ATTR_ALLOW_POST,
     ATTR_HOST_ID,
@@ -54,12 +56,15 @@ from .constants import (
     CONF_WEATHER_COUNTRY,
     CONF_WEATHER_PROVIDER,
     CONF_WEATHER_TIMEOUT,
+    DEFAULT_AI_ORDER_MAX_TRACKS,
+    DEFAULT_AI_ORDER_PROMPT,
     DEFAULT_LLM_INSTRUCTIONS,
     DEFAULT_WEATHER_PROVIDER,
     DEFAULT_WEATHER_TIMEOUT_SECONDS,
     DEFERRED_PLACEHOLDERS,
     FAHRENHEIT_COUNTRY_CODES,
     SHOW_START_TIMEOUT_SECONDS,
+    TRACK_ORDER_AI,
     TTS_PRONUNCIATION_INSTRUCTIONS,
     VALID_WEB_SEARCH_MODES,
     WEATHER_PLACEHOLDER_TOKENS,
@@ -215,6 +220,9 @@ class AIRadioRuntimeMixin:
 
         tracks, playlist_name = await self._fetch_source_tracks(program)
         tracks = self._apply_source_shuffle(tracks, program)
+        if program.get("track_order") == TRACK_ORDER_AI:
+            self._set_session_progress(session, "ordering_tracks", total_tracks=len(tracks))
+            tracks = await self._apply_ai_order(tracks, program)
         tracks = self._apply_track_duration_limit(tracks, program)
         if not tracks:
             raise MusicAssistantError("No source tracks available after applying station limits")
@@ -495,6 +503,51 @@ class AIRadioRuntimeMixin:
             result.append(updated)
         self.logger.info("Shuffled %d source tracks", len(result))
         return result
+
+    async def _apply_ai_order(
+        self, tracks: list[dict[str, Any]], station: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """
+        Return the songs of a show in the running order the AI puts together.
+
+        The AI orders a pick of the station's maximum number of songs; when it cannot be
+        reached the pick plays in the order it was drawn.
+
+        :param tracks: The source tracks, already shuffled so the pick differs every show.
+        :param station: The station+host program being played.
+        """
+        max_tracks = coerce_int(station.get("ai_order_max_tracks"), DEFAULT_AI_ORDER_MAX_TRACKS)
+        pool = tracks[:max_tracks]
+        if len(pool) < 2:
+            return _reindexed(pool)
+        try:
+            reply = await self._ask_ai(self._ai_order_query(pool, station))
+        except MusicAssistantError as err:
+            self.logger.warning("AI running order failed, playing the songs shuffled: %s", err)
+            return _reindexed(pool)
+        order, followed = _parse_track_order(reply, len(pool))
+        self.logger.info(
+            "AI running order for %d songs: %d placed as asked, the rest appended",
+            len(pool),
+            followed,
+        )
+        return _reindexed([pool[index] for index in order])
+
+    def _ai_order_query(self, tracks: list[dict[str, Any]], station: dict[str, Any]) -> str:
+        """Return the request that asks the AI for a running order of the given songs."""
+        prompt = str(station.get("ai_order_prompt") or "").strip() or DEFAULT_AI_ORDER_PROMPT
+        prompt = prompt.replace("<timestamp>", format_ai_radio_timestamp(self._configured_now()))
+        parts = [prompt]
+        if wish := str(station.get("listener_wish") or "").strip():
+            parts.append(
+                f"The listener's wish for this show: {wish}. Follow it where the songs allow."
+            )
+        songs = "\n".join(
+            f"{number}. {_describe_track(track)}" for number, track in enumerate(tracks, start=1)
+        )
+        parts.append(f"The songs:\n{songs}")
+        parts.append(AI_ORDER_REPLY_INSTRUCTION)
+        return "\n\n".join(parts)
 
     def _apply_track_duration_limit(
         self, tracks: list[dict[str, Any]], station: dict[str, Any]
@@ -1299,13 +1352,17 @@ class AIRadioRuntimeMixin:
             f"Task: Write one concise spoken radio section.\n\n{prompt}\n\nReturn plain text only."
         )
         query = "\n\n".join(query_parts)
+        self.logger.debug("AI query prepared: web_mode=%s", web_mode)
+        return await self._ask_ai(query)
+
+    async def _ask_ai(self, query: str) -> str:
+        """
+        Send a query to the configured AI engine and return its answer.
+
+        :param query: The full query text.
+        """
         engine = await self._get_ai_engine()
-        self.logger.debug(
-            "AI query prepared: engine=%s web_mode=%s query_chars=%d",
-            engine.uid,
-            web_mode,
-            len(query),
-        )
+        self.logger.debug("AI query sent: engine=%s query_chars=%d", engine.uid, len(query))
         try:
             async with asyncio.timeout(AI_QUERY_TIMEOUT_SECONDS) as query_timeout:
                 response = await engine.provider.ai_query(query, engine_id=engine.id)
@@ -1326,9 +1383,7 @@ class AIRadioRuntimeMixin:
             details = error_text or error_name
             raise MusicAssistantError(f"AI engine '{engine.uid}' query failed: {details}") from err
         if not response or not str(response).strip():
-            raise MusicAssistantError(
-                f"AI engine '{engine.uid}' returned an empty response for section text"
-            )
+            raise MusicAssistantError(f"AI engine '{engine.uid}' returned an empty response")
         text = str(response).strip()
         self.logger.debug(
             "AI query response received: engine=%s chars=%d",
@@ -1377,3 +1432,58 @@ class AIRadioRuntimeMixin:
             "(for example Home Assistant with a TTS entity) and select it in the AI Radio "
             "settings."
         )
+
+
+def _reindexed(tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return copies of the tracks numbered by their new position, keeping their source index."""
+    result: list[dict[str, Any]] = []
+    for new_index, track in enumerate(tracks):
+        updated = deepcopy(track)
+        updated.setdefault("source_index", track.get("index"))
+        updated["index"] = new_index
+        result.append(updated)
+    return result
+
+
+def _describe_track(track: dict[str, Any]) -> str:
+    """Return one line telling the AI what a song is: who, what, when, which genre, how long."""
+    details: list[str] = []
+    media_item = track.get("media_item")
+    album: Any = getattr(media_item, "album", None)
+    if album_name := str(getattr(album, "name", None) or ""):
+        details.append(album_name)
+    if year := getattr(album, "year", None):
+        details.append(str(year))
+    metadata: Any = getattr(media_item, "metadata", None)
+    if genres := sorted(getattr(metadata, "genres", None) or []):
+        details.append(", ".join(genres[:3]))
+    duration = track.get("duration")
+    if isinstance(duration, (int, float)) and duration > 0:
+        details.append(f"{int(duration) // 60}:{int(duration) % 60:02d}")
+    line = track_songinfo(track)
+    return f"{line} ({'; '.join(details)})" if details else line
+
+
+def _parse_track_order(reply: str, count: int) -> tuple[list[int], int]:
+    """
+    Return the running order the AI answered as 0-based positions, and how many it placed.
+
+    Songs it left out, repeated or numbered wrongly keep their drawn order after the ones it
+    placed, so every song still plays exactly once.
+
+    :param reply: The AI's answer, expected to hold a JSON array of 1-based song numbers.
+    :param count: How many songs it was asked to order.
+    """
+    placed: list[int] = []
+    start, end = reply.find("["), reply.rfind("]")
+    if 0 <= start < end:
+        try:
+            numbers = json.loads(reply[start : end + 1])
+        except ValueError:
+            numbers = []
+        for number in numbers if isinstance(numbers, list) else []:
+            if isinstance(number, int) and 1 <= number <= count and number - 1 not in placed:
+                placed.append(number - 1)
+    followed = len(placed)
+    placed += [index for index in range(count) if index not in set(placed)]
+    return placed, followed

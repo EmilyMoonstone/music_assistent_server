@@ -34,6 +34,7 @@ from .constants import (
     ENGINE_RETRY_DELAY,
     LOUDNESS_MEASURE_TIMEOUT,
     MAX_FINISHED_SESSIONS,
+    MAX_LISTENER_WISH_CHARS,
     SUPPORTED_FEATURES,
     TRANSLATION_OWNER,
 )
@@ -413,8 +414,14 @@ class AIRadioProvider(
         source_playlist_provider_override: str | None = None,
         player_id_override: str | None = None,
         dynamic_source_playtime_cap_override: int | float | None = None,  # noqa: PYI041
+        listener_wish: str | None = None,
     ) -> dict[str, Any]:
-        """Start a new AI Radio run."""
+        """
+        Start a new AI Radio run.
+
+        :param listener_wish: A wish for this show only, e.g. "calm, we are cooking", that
+            an AI running order follows where the songs allow.
+        """
         if station_id not in self._stations:
             raise KeyError(f"Unknown station id: {station_id}")
 
@@ -448,6 +455,7 @@ class AIRadioProvider(
         if host is None:
             raise InvalidDataError(f"Station references unknown host: {host_id}")
         program = self._build_program(station, deepcopy(host))
+        program["listener_wish"] = (listener_wish or "").strip()[:MAX_LISTENER_WISH_CHARS]
 
         # the run guards and the session insert must stay one critical section, or a future
         # await between them would let concurrent callers slip past the concurrency limits
