@@ -36,6 +36,7 @@ from music_assistant.helpers.tts import (
     resolve_tts_language,
     resolve_tts_stream_path,
 )
+from music_assistant.models.plugin import LeadIn
 
 from .constants import (
     ATTR_HOST_ID,
@@ -50,6 +51,7 @@ from .constants import (
     CLIP_STREAMDETAILS_EXPIRATION,
     CONF_TTS_LOUDNESS_BOOST,
     DEFAULT_EFFECT_LOUDNESS,
+    DEFAULT_LEAD_IN_SECONDS,
     DEFAULT_MUSIC_BED_LEVEL,
     DEFAULT_TTS_LOUDNESS_BOOST,
     DEFERRED_PLACEHOLDERS,
@@ -210,6 +212,24 @@ class AIRadioRenderMixin:
             filter_params=filter_params,
         ):
             yield chunk
+
+    def get_lead_in(self, streamdetails: StreamDetails) -> LeadIn | None:
+        """
+        Return how the song before blends into a break, as its host is set up to.
+
+        :param streamdetails: Stream details of the break about to play.
+        """
+        queue_item = self._find_clip_item(streamdetails.item_id)
+        if queue_item is None:
+            return None
+        host = self._hosts.get(str(queue_item.extra_attributes.get(ATTR_HOST_ID) or "")) or {}
+        effects = host.get("effects") or {}
+        mode = effects.get("lead_in")
+        if mode not in ("crossfade", "talk_up"):
+            return None
+        seconds = coerce_float(effects.get("lead_in_seconds"), DEFAULT_LEAD_IN_SECONDS)
+        # a talk-up keeps the voice (or jingle) at full level over the song's fading outro
+        return LeadIn(seconds=seconds, fade_in=mode == "crossfade")
 
     def _lock_for(self, clip_id: str) -> asyncio.Lock:
         """Return the per-clip render lock, creating it on first use."""

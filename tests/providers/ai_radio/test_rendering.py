@@ -36,7 +36,7 @@ from music_assistant.constants import (
 from music_assistant.helpers.dsp import ComplexFilter
 from music_assistant.helpers.tags import AudioTags
 from music_assistant.helpers.tts import TTSLanguageNotSupportedError
-from music_assistant.models.plugin import PluginProvider, TTSEngine
+from music_assistant.models.plugin import LeadIn, PluginProvider, TTSEngine
 from music_assistant.providers.ai_radio.constants import (
     ATTR_HOST_ID,
     ATTR_JINGLE,
@@ -1537,3 +1537,34 @@ async def test_the_same_jingle_does_not_open_two_breaks_in_a_row() -> None:
 
     picked = [item.extra_attributes[ATTR_JINGLE] for item in items]
     assert all(first != second for first, second in itertools.pairwise(picked))
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("crossfade", LeadIn(seconds=4, fade_in=True)),
+        ("talk_up", LeadIn(seconds=4, fade_in=False)),
+        ("cut", None),
+    ],
+)
+async def test_the_song_before_blends_into_a_break_as_its_host_wants(
+    mode: str, expected: LeadIn | None
+) -> None:
+    """The host's transition becomes the lead-in the stream asks the plugin for."""
+    renderer = DummyRenderer()
+    renderer._hosts["mika"] = {
+        "effects": normalize_effects({"lead_in": mode, "lead_in_seconds": 4})
+    }
+    _attach_queue(renderer, [_clip_item("sess_001", **{ATTR_HOST_ID: "mika"})])
+
+    lead_in = renderer.get_lead_in(cast("Any", SimpleNamespace(item_id="sess_001")))
+
+    assert lead_in == expected
+
+
+async def test_a_break_no_queue_holds_gets_no_lead_in() -> None:
+    """A clip that is gone from every queue keeps the cut."""
+    renderer = DummyRenderer()
+    _attach_queue(renderer, [])
+
+    assert renderer.get_lead_in(cast("Any", SimpleNamespace(item_id="sess_404"))) is None

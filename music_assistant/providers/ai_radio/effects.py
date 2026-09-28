@@ -16,6 +16,8 @@ from music_assistant.helpers.dsp import ComplexFilter, ComplexFilterInput
 from .constants import (
     DEFAULT_JINGLE_CHANCE,
     DEFAULT_JINGLE_SELECTION,
+    DEFAULT_LEAD_IN,
+    DEFAULT_LEAD_IN_SECONDS,
     DEFAULT_MUSIC_BED_LEVEL,
     EFFECT_BUILTIN_JINGLE,
     JINGLE_CHOICE_INSTRUCTION,
@@ -24,6 +26,8 @@ from .constants import (
     JINGLE_SLOT_OCCASIONS,
     JINGLE_TIME_TAGS,
     JINGLE_VOICE_OVERLAP_SECONDS,
+    LEAD_IN_MODES,
+    LEAD_IN_SECONDS_RANGE,
     MAX_JINGLE_TEXT_CHARS,
     MAX_JINGLES,
     MUSIC_BED_FADE_IN_SECONDS,
@@ -63,6 +67,8 @@ def default_effects() -> dict[str, Any]:
         "jingle_selection": DEFAULT_JINGLE_SELECTION,
         "music_bed": "",
         "music_bed_level": DEFAULT_MUSIC_BED_LEVEL,
+        "lead_in": DEFAULT_LEAD_IN,
+        "lead_in_seconds": DEFAULT_LEAD_IN_SECONDS,
     }
 
 
@@ -99,6 +105,11 @@ def normalize_effects(raw: Any) -> dict[str, Any]:
     low, high = MUSIC_BED_LEVEL_RANGE
     level = coerce_float(effects.get("music_bed_level"), DEFAULT_MUSIC_BED_LEVEL)
     normalized["music_bed_level"] = min(high, max(low, level))
+    lead_in = str(effects.get("lead_in") or DEFAULT_LEAD_IN)
+    normalized["lead_in"] = lead_in if lead_in in LEAD_IN_MODES else DEFAULT_LEAD_IN
+    low, high = LEAD_IN_SECONDS_RANGE
+    seconds = coerce_float(effects.get("lead_in_seconds"), DEFAULT_LEAD_IN_SECONDS)
+    normalized["lead_in_seconds"] = min(high, max(low, seconds))
     return normalized
 
 

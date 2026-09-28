@@ -14,6 +14,7 @@ from music_assistant.helpers.ffmpeg import get_ffmpeg_args
 from music_assistant.providers.ai_radio.constants import (
     DEFAULT_JINGLE_CHANCE,
     DEFAULT_MUSIC_BED_LEVEL,
+    LEAD_IN_SECONDS_RANGE,
     MAX_JINGLES,
     MUSIC_BED_LEVEL_RANGE,
     MUSIC_BED_TAIL_SECONDS,
@@ -348,3 +349,14 @@ def test_the_announced_duration_covers_jingle_and_bed_tail() -> None:
     assert dressed_duration(effects, 10) == 15
     assert dressed_duration(ClipEffects(), 10) == 10
     assert dressed_duration(effects, None) is None
+
+
+def test_the_lead_in_is_kept_to_known_modes_and_a_sane_length() -> None:
+    """An unknown transition falls back to a cut, and the overlap stays within range."""
+    low, high = LEAD_IN_SECONDS_RANGE
+
+    assert default_effects()["lead_in"] == "cut"
+    assert normalize_effects({"lead_in": "talk_up", "lead_in_seconds": 4})["lead_in"] == "talk_up"
+    assert normalize_effects({"lead_in": "wobble"})["lead_in"] == "cut"
+    assert normalize_effects({"lead_in_seconds": 30})["lead_in_seconds"] == high
+    assert normalize_effects({"lead_in_seconds": 0})["lead_in_seconds"] == low
