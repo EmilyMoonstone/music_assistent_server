@@ -187,6 +187,12 @@ DEFAULT_JINGLE_CHANCE = 20
 JINGLE_SELECTION_MODES = ("ai", "random")
 DEFAULT_JINGLE_SELECTION = "ai"
 MAX_JINGLES = 50
+# jingles are picked from Home Assistant's media folder, the one folder every install
+# shares with Music Assistant; browsing stops at its edge
+JINGLE_MEDIA_ROOT = "/media"
+JINGLE_FILE_EXTENSIONS = frozenset(
+    {".mp3", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".wav", ".aiff", ".aif", ".wma"}
+)
 MAX_JINGLE_TEXT_CHARS = 300
 # the LLM that writes a break also picks its jingle, answering on a line of its own
 JINGLE_CHOICE_INSTRUCTION = (
