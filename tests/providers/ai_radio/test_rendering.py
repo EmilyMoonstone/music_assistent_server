@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -39,6 +40,7 @@ from music_assistant.models.plugin import PluginProvider, TTSEngine
 from music_assistant.providers.ai_radio.constants import (
     ATTR_ALLOW_POST,
     ATTR_HOST_ID,
+    ATTR_JINGLE,
     ATTR_MAX_CHARS,
     ATTR_PROMPT,
     ATTR_RENDERED_TEXT,
@@ -85,6 +87,8 @@ class DummyRenderer(AIRadioMemoryMixin, AIRadioRenderMixin):
         self.measure_calls: list[str] = []
         self.measured_loudness: float | None = None
         self.break_memory_enabled = True
+        self.llm_reply = "Good evening, it is warm out."
+        self.next_genres: set[str] | None = None
         self.memory_writes = 0
 
     def _configured_now(self) -> Any:
@@ -99,7 +103,7 @@ class DummyRenderer(AIRadioMemoryMixin, AIRadioRenderMixin):
         if self.fail_generation:
             raise RuntimeError("llm down")
         self.llm_prompts.append(prompt)
-        return "Good evening, it is warm out."
+        return self.llm_reply
 
     async def _write_break_memory(self) -> None:
         self.memory_writes += 1
@@ -194,6 +198,15 @@ def _attach_queues(renderer: DummyRenderer, queues: dict[str, list[QueueItem]]) 
                 offset : offset + limit
             ],
             signal_update=lambda _queue_id, items_changed=False: signals.append(items_changed),
+            get_next_item=lambda _queue_id, _item_id: (
+                None
+                if renderer.next_genres is None
+                else SimpleNamespace(
+                    media_item=SimpleNamespace(
+                        metadata=SimpleNamespace(genres=renderer.next_genres)
+                    )
+                )
+            ),
         ),
         metadata=SimpleNamespace(locale="en_US"),
     )
@@ -1482,3 +1495,94 @@ async def test_a_host_without_effects_probes_no_sounds(monkeypatch: pytest.Monke
 
     assert probed == []
     assert streamdetails.data is None or streamdetails.data.effects is None
+
+
+# a plain transition: no weather or news in it, so only the general jingles fit
+TRANSITION = {ATTR_HOST_ID: "mika", ATTR_SLOT_WHEN: "between_songs", ATTR_PROMPT: "Talk."}
+
+
+def _jingle_host(renderer: DummyRenderer, selection: str = "ai", chance: int = 100) -> None:
+    """Give 'mika' a library of two general jingles and a news jingle."""
+    renderer._hosts["mika"] = {
+        "effects": normalize_effects(
+            {
+                "jingles": [
+                    {"source": "/media/calm.mp3", "tags": ["calm"], "text": "Mika hier."},
+                    {"source": "/media/indie.mp3", "tags": ["indie"], "text": "Indie!"},
+                    {"source": "/media/news.mp3", "tags": ["news"], "text": "Neues."},
+                ],
+                "jingle_selection": selection,
+                "jingle_chance": chance,
+            }
+        )
+    }
+
+
+async def test_the_llm_picks_the_jingle_and_the_line_is_not_spoken() -> None:
+    """The script's first line names the jingle, and only the script is voiced and kept."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer)
+    renderer.llm_reply = "JINGLE: 2\nGood evening, it is warm out."
+    item = _clip_item("sess_001", **TRANSITION)
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert '1. [calm] "Mika hier."' in renderer.llm_prompts[0]
+    assert "news.mp3" not in renderer.llm_prompts[0]
+    assert item.extra_attributes[ATTR_JINGLE] == "/media/indie.mp3"
+    assert renderer.tts_texts == ["Good evening, it is warm out."]
+    assert renderer._break_memory["mika"][-1]["text"] == "Good evening, it is warm out."
+
+
+async def test_an_unanswered_choice_falls_back_to_the_genre_of_the_next_song() -> None:
+    """When the LLM names no jingle, one tagged for the next song's genre is taken."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer)
+    renderer.next_genres = {"Indie Rock"}
+    item = _clip_item("sess_001", **TRANSITION)
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert item.extra_attributes[ATTR_JINGLE] == "/media/indie.mp3"
+
+
+async def test_random_selection_never_asks_the_llm() -> None:
+    """Left to chance, the prompt carries no jingle options."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer, selection="random")
+    item = _clip_item("sess_001", **{ATTR_HOST_ID: "mika", ATTR_WEB_SEARCH_MODE: "force"})
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert "JINGLE" not in renderer.llm_prompts[0]
+    assert item.extra_attributes[ATTR_JINGLE] == "/media/news.mp3"
+
+
+async def test_a_transition_without_luck_opens_without_a_jingle() -> None:
+    """At a 0% chance plain transitions stay bare, and nothing is offered to the LLM."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer, chance=0)
+    item = _clip_item("sess_001", **TRANSITION)
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert "JINGLE" not in renderer.llm_prompts[0]
+    assert item.extra_attributes[ATTR_JINGLE] == ""
+
+
+async def test_the_same_jingle_does_not_open_two_breaks_in_a_row() -> None:
+    """The host moves on to another jingle when there is one to move on to."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer, selection="random")
+    items = [_clip_item(f"sess_00{n}", **TRANSITION) for n in range(1, 5)]
+    _attach_queue(renderer, items)
+
+    for n in range(1, 5):
+        await renderer.get_stream_details(f"sess_00{n}", MediaType.SOUND_EFFECT)
+
+    picked = [item.extra_attributes[ATTR_JINGLE] for item in items]
+    assert all(first != second for first, second in itertools.pairwise(picked))

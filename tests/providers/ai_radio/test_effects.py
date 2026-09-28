@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import random
+from typing import Any
+
 import pytest
 from music_assistant_models.errors import InvalidDataError
 
@@ -9,7 +12,9 @@ from music_assistant.constants import ANNOUNCE_ALERT_FILE
 from music_assistant.helpers.dsp import ComplexFilter
 from music_assistant.helpers.ffmpeg import get_ffmpeg_args
 from music_assistant.providers.ai_radio.constants import (
+    DEFAULT_JINGLE_CHANCE,
     DEFAULT_MUSIC_BED_LEVEL,
+    MAX_JINGLES,
     MUSIC_BED_LEVEL_RANGE,
     MUSIC_BED_TAIL_SECONDS,
     TTS_CLIP_PCM_FORMAT,
@@ -20,12 +25,26 @@ from music_assistant.providers.ai_radio.effects import (
     default_effects,
     dressed_duration,
     effect_filters,
-    jingle_source,
+    jingle_candidates,
+    jingle_choice_prompt,
+    jingle_occasion,
+    jingle_text_from_lyrics,
     normalize_effects,
+    pick_jingle,
+    resolve_source,
+    take_jingle_choice,
+    time_of_day_tag,
 )
 
 JINGLE = EffectSound(path="/media/jingle.mp3", seconds=2.4, gain_db=-3.0)
 BED = EffectSound(path="/media/bed.mp3", seconds=120.0, gain_db=-20.5)
+
+
+def _library(*jingles: tuple[str, list[str]]) -> dict[str, Any]:
+    """Build normalized effects holding the given (source, tags) jingles."""
+    return normalize_effects(
+        {"jingles": [{"source": source, "tags": tags} for source, tags in jingles]}
+    )
 
 
 def test_a_host_without_effects_airs_bare() -> None:
@@ -33,37 +52,61 @@ def test_a_host_without_effects_airs_bare() -> None:
     assert normalize_effects(None) == default_effects()
     assert normalize_effects("nonsense") == default_effects()
     assert default_effects()["music_bed_level"] == DEFAULT_MUSIC_BED_LEVEL
+    assert default_effects()["jingle_chance"] == DEFAULT_JINGLE_CHANCE
 
 
-def test_effects_accept_the_builtin_gong_paths_and_urls() -> None:
-    """A jingle may be the shipped gong, a file or a URL, and surrounding blanks are dropped."""
+def test_library_jingles_are_normalized() -> None:
+    """Tags are lowercased, deduplicated and sorted, words are flattened to one line."""
     effects = normalize_effects(
         {
-            "news_jingle": "builtin",
-            "show_jingle": " /media/ai_radio/ident.mp3 ",
-            "music_bed": "https://example.test/bed.mp3",
-            "music_bed_level": "-24",
+            "jingles": [
+                {
+                    "source": " /media/ai_radio/untergrund.mp3 ",
+                    "tags": ["News", "news", "Late Night", " "],
+                    "text": "Neues aus\n dem Untergrund.",
+                },
+                {"source": "builtin"},
+            ],
+            "jingle_chance": 150,
+            "jingle_selection": "sometimes",
         }
     )
 
-    assert effects == {
-        "news_jingle": "builtin",
-        "show_jingle": "/media/ai_radio/ident.mp3",
-        "music_bed": "https://example.test/bed.mp3",
-        "music_bed_level": -24.0,
-    }
+    assert effects["jingles"] == [
+        {
+            "source": "/media/ai_radio/untergrund.mp3",
+            "tags": ["late_night", "news"],
+            "text": "Neues aus dem Untergrund.",
+        },
+        {"source": "builtin", "tags": [], "text": ""},
+    ]
+    assert effects["jingle_chance"] == 100
+    assert effects["jingle_selection"] == "ai"
+
+
+def test_the_first_versions_single_jingles_become_library_entries() -> None:
+    """A stored news or show jingle keeps working as a tagged entry."""
+    effects = normalize_effects({"news_jingle": "builtin", "show_jingle": "/media/ident.mp3"})
+
+    assert effects["jingles"] == [
+        {"source": "builtin", "tags": ["news"], "text": ""},
+        {"source": "/media/ident.mp3", "tags": ["intro", "outro"], "text": ""},
+    ]
+    assert "news_jingle" not in effects
 
 
 @pytest.mark.parametrize(
     "effects",
     [
         {"music_bed": "builtin"},
-        {"news_jingle": "media/jingle.mp3"},
-        {"show_jingle": "ftp://example.test/ident.mp3"},
+        {"music_bed": "bed.mp3"},
+        {"jingles": [{"source": "media/jingle.mp3"}]},
+        {"jingles": [{"source": "ftp://example.test/ident.mp3"}]},
+        {"jingles": [{"source": "/media/j.mp3"}] * (MAX_JINGLES + 1)},
     ],
 )
-def test_effects_refuse_what_ffmpeg_cannot_open(effects: dict[str, str]) -> None:
-    """There is no shipped bed, and a relative path or other scheme is rejected up front."""
+def test_effects_refuse_what_ffmpeg_cannot_open(effects: dict[str, Any]) -> None:
+    """There is no shipped bed, a relative path or other scheme is rejected up front."""
     with pytest.raises(InvalidDataError):
         normalize_effects(effects)
 
@@ -80,29 +123,158 @@ def test_the_bed_level_is_kept_within_range() -> None:
 
 
 @pytest.mark.parametrize(
-    ("news", "slot_when", "expected"),
+    ("news", "weather", "slot_when", "expected"),
     [
-        (True, "between_songs", "/media/news.mp3"),
-        (True, "start_of_playlist", "/media/news.mp3"),
-        (False, "start_of_playlist", "/media/ident.mp3"),
-        (False, "end_of_playlist", "/media/ident.mp3"),
-        (False, "between_songs", ""),
+        (True, False, "start_of_playlist", "news"),
+        (False, False, "start_of_playlist", "intro"),
+        (False, True, "end_of_playlist", "outro"),
+        (False, True, "between_songs", "weather"),
+        (False, False, "between_songs", "transition"),
     ],
 )
-def test_the_jingle_follows_what_the_break_is(news: bool, slot_when: str, expected: str) -> None:
-    """News opens with the news jingle, a show's first and last break with the ident."""
-    effects = normalize_effects(
-        {"news_jingle": "/media/news.mp3", "show_jingle": "/media/ident.mp3"}
+def test_the_occasion_follows_what_the_break_is(
+    news: bool, weather: bool, slot_when: str, expected: str
+) -> None:
+    """News wins over everything, a show's ends over the weather."""
+    assert jingle_occasion(news, weather, slot_when) == expected
+
+
+@pytest.mark.parametrize(
+    ("hour", "expected"),
+    [
+        (5, "morning"),
+        (9, "morning"),
+        (10, "daytime"),
+        (17, "evening"),
+        (22, "late_night"),
+        (3, "late_night"),
+    ],
+)
+def test_time_of_day_tags_cover_the_whole_day(hour: int, expected: str) -> None:
+    """Every hour has its tag, and the night wraps around midnight."""
+    assert time_of_day_tag(hour) == expected
+
+
+def test_news_only_gets_a_news_jingle() -> None:
+    """Without a news-tagged jingle the news opens bare, general jingles are not used."""
+    effects = _library(("/media/general.mp3", []), ("/media/news.mp3", ["news"]))
+
+    assert [j["source"] for j in jingle_candidates(effects, "news", 12)] == ["/media/news.mp3"]
+    assert jingle_candidates(_library(("/media/general.mp3", [])), "news", 12) == []
+    assert jingle_candidates(_library(("/media/general.mp3", [])), "weather", 12) == []
+
+
+def test_a_show_falls_back_to_general_jingles() -> None:
+    """An intro without an intro jingle still gets a general one."""
+    effects = _library(("/media/general.mp3", ["general"]), ("/media/news.mp3", ["news"]))
+
+    sources = [j["source"] for j in jingle_candidates(effects, "intro", 12)]
+
+    assert sources == ["/media/general.mp3"]
+
+
+def test_transitions_draw_from_general_jingles_only() -> None:
+    """A jingle tagged for an occasion is kept for it; untagged ones count as general."""
+    effects = _library(
+        ("/media/untagged.mp3", ["indie"]),
+        ("/media/news.mp3", ["news"]),
+        ("/media/both.mp3", ["general", "news"]),
     )
 
-    assert jingle_source(effects, news=news, slot_when=slot_when) == expected
+    sources = {j["source"] for j in jingle_candidates(effects, "transition", 12)}
+
+    assert sources == {"/media/untagged.mp3", "/media/both.mp3"}
+
+
+def test_jingles_for_another_time_of_day_are_left_out() -> None:
+    """A late-night jingle does not open the morning show, an untimed one fits any time."""
+    effects = _library(
+        ("/media/night.mp3", ["late_night"]),
+        ("/media/morning.mp3", ["morning"]),
+        ("/media/any.mp3", []),
+    )
+
+    sources = {j["source"] for j in jingle_candidates(effects, "transition", 7)}
+
+    assert sources == {"/media/morning.mp3", "/media/any.mp3"}
+
+
+def test_only_off_time_jingles_are_still_better_than_none() -> None:
+    """When nothing is tagged for the hour, the off-time jingles still play."""
+    effects = _library(("/media/night.mp3", ["late_night"]))
+
+    assert len(jingle_candidates(effects, "transition", 12)) == 1
+
+
+def test_the_last_jingle_is_not_played_twice_in_a_row() -> None:
+    """With a choice, the host skips the jingle it just played."""
+    effects = _library(("/media/a.mp3", []), ("/media/b.mp3", []))
+
+    candidates = jingle_candidates(effects, "transition", 12, "/media/a.mp3")
+
+    assert [j["source"] for j in candidates] == ["/media/b.mp3"]
+    single = _library(("/media/a.mp3", []))
+    assert len(jingle_candidates(single, "transition", 12, "/media/a.mp3")) == 1
+
+
+def test_random_pick_prefers_a_jingle_for_the_next_genre() -> None:
+    """A jingle tagged indie opens an indie rock song when the choice is left to chance."""
+    effects = _library(("/media/calm.mp3", ["calm"]), ("/media/indie.mp3", ["indie"]))
+    candidates = jingle_candidates(effects, "transition", 12)
+
+    for seed in range(10):
+        chosen = pick_jingle(candidates, {"indie rock"}, random.Random(seed))
+        assert chosen is not None
+        assert chosen["source"] == "/media/indie.mp3"
+    assert pick_jingle([], {"pop"}) is None
+
+
+def test_the_llm_is_offered_numbered_jingles_with_their_words() -> None:
+    """The prompt lists every candidate with its tags and what it says."""
+    effects = normalize_effects(
+        {"jingles": [{"source": "/media/a.mp3", "tags": ["calm"], "text": "Mika hier."}]}
+    )
+
+    prompt = jingle_choice_prompt(effects["jingles"])
+
+    assert "JINGLE: <number>" in prompt
+    assert '1. [calm] "Mika hier."' in prompt
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected_source", "expected_text"),
+    [
+        ("JINGLE: 2\nGuten Abend.", "/media/b.mp3", "Guten Abend."),
+        ("**JINGLE: 1**\n\nGuten Abend.", "/media/a.mp3", "Guten Abend."),
+        ("JINGLE: 7\nGuten Abend.", None, "Guten Abend."),
+        ("Guten Abend.", None, "Guten Abend."),
+    ],
+)
+def test_the_choice_line_is_read_and_never_spoken(
+    reply: str, expected_source: str | None, expected_text: str
+) -> None:
+    """A valid number picks its jingle, and the line is stripped either way."""
+    candidates = _library(("/media/a.mp3", []), ("/media/b.mp3", []))["jingles"]
+
+    choice, text = take_jingle_choice(reply, candidates)
+
+    assert (choice["source"] if choice else None) == expected_source
+    assert text == expected_text
+
+
+def test_jingle_words_come_from_the_lyrics_without_cue_marks() -> None:
+    """Suno's [Spoken] style marks are dropped from what the jingle says."""
+    lyrics = "[Spoken, dry] Keine Floskeln. Nur gute Musik. Mika am Mikro. [End]"
+
+    assert jingle_text_from_lyrics(lyrics) == "Keine Floskeln. Nur gute Musik. Mika am Mikro."
+    assert jingle_text_from_lyrics("[Jingle]") == ""
+    assert jingle_text_from_lyrics(None) == ""
 
 
 def test_the_builtin_jingle_is_the_announcement_gong() -> None:
     """The shipped gong needs no file of the user's own."""
-    effects = normalize_effects({"news_jingle": "builtin"})
-
-    assert jingle_source(effects, news=True, slot_when="between_songs") == ANNOUNCE_ALERT_FILE
+    assert resolve_source("builtin") == ANNOUNCE_ALERT_FILE
+    assert resolve_source("/media/a.mp3") == "/media/a.mp3"
 
 
 def test_a_break_without_effects_gets_no_filters() -> None:
