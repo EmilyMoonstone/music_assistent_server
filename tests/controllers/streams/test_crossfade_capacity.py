@@ -163,6 +163,7 @@ async def test_unprepared_next_track_flushes_outgoing_tail_without_opening_sourc
     current_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="current",
+        media_type=MediaType.TRACK,
         name="Current",
         streamdetails=current_details,
         extra_attributes={},
@@ -170,6 +171,7 @@ async def test_unprepared_next_track_flushes_outgoing_tail_without_opening_sourc
     next_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="next",
+        media_type=MediaType.TRACK,
         name="Next",
         streamdetails=next_details,
         extra_attributes={},
@@ -251,6 +253,7 @@ async def test_crossfade_reads_its_window_past_the_resident_buffer(
     current_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="current",
+        media_type=MediaType.TRACK,
         name="Current",
         streamdetails=current_details,
         extra_attributes={},
@@ -258,6 +261,7 @@ async def test_crossfade_reads_its_window_past_the_resident_buffer(
     next_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="next",
+        media_type=MediaType.TRACK,
         name="Next",
         streamdetails=next_details,
         extra_attributes={"playback_speed": playback_speed},
