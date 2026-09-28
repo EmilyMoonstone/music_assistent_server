@@ -274,5 +274,22 @@ AI_ORDER_REPLY_INSTRUCTION = (
 # HA drops a tts_proxy token 60s after its last use at the lowest configurable time_memory
 CLIP_STREAMDETAILS_EXPIRATION = 60
 
+# a TTS engine that hands out a URL (Home Assistant's tts_proxy) is read once into a local
+# copy: the link dies a minute after its last use, and some setups close the transfer with an
+# error after the last byte, which would otherwise abort the clip on air. The copy is plain PCM
+# in a WAV file, in the format the clip is played at
+CLIP_COPY_PREFIX = "ma_ai_radio_clip_"
+CLIP_COPY_FORMAT = AudioFormat(
+    content_type=ContentType.WAV,
+    sample_rate=TTS_CLIP_PCM_FORMAT.sample_rate,
+    bit_depth=TTS_CLIP_PCM_FORMAT.bit_depth,
+    channels=TTS_CLIP_PCM_FORMAT.channels,
+)
+# how long a local copy is kept and handed out again, and when a leftover one is deleted
+CLIP_COPY_LIFETIME = 3600
+CLIP_FETCH_TIMEOUT = 60
+# a copy shorter than this holds no speech, it is a failed fetch (0.2s of 48 kHz stereo s16)
+MIN_CLIP_COPY_BYTES = 44 + 38400
+
 # a cached clip with less life than this left is not worth handing out, so it is re-minted
 MIN_CLIP_MEDIA_LIFETIME = 5

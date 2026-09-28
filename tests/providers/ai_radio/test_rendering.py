@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import os
+import tempfile
+import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,10 +55,12 @@ from music_assistant.providers.ai_radio.constants import (
     BREAK_MEMORY_BREAKS_INSTRUCTION,
     BREAK_MEMORY_EMPTY,
     BREAK_MEMORY_NEWS_INSTRUCTION,
-    CLIP_STREAMDETAILS_EXPIRATION,
+    CLIP_COPY_LIFETIME,
+    CLIP_COPY_PREFIX,
     CONF_BREAK_MEMORY,
     CONF_TTS_LOUDNESS_BOOST,
     DEFAULT_LLM_INSTRUCTIONS,
+    MIN_CLIP_COPY_BYTES,
     MIN_LOUDNESS_REFERENCE_SECONDS,
     NO_WEATHER_DATA_INSTRUCTION,
     TTS_CLIP_PCM_FORMAT,
@@ -90,6 +95,7 @@ class DummyRenderer(AIRadioMemoryMixin, AIRadioRenderMixin):
         self.llm_reply = "Good evening, it is warm out."
         self.next_genres: set[str] | None = None
         self.memory_writes = 0
+        self.copied_urls: list[str] = []
 
     def _configured_now(self) -> Any:
         return __import__("datetime").datetime(2026, 7, 30, 18, 30)
@@ -126,6 +132,10 @@ class DummyRenderer(AIRadioMemoryMixin, AIRadioRenderMixin):
             StreamType.HTTP,
             AudioFormat(content_type=ContentType.MP3),
         )
+
+    async def _keep_local_copy(self, url: str) -> str:
+        self.copied_urls.append(url)
+        return f"/media/copies/ma_ai_radio_clip_{len(self.copied_urls)}.wav"
 
     async def _probe_duration(self, path: str) -> int | None:
         return 9
@@ -266,9 +276,9 @@ async def test_render_resolves_deferred_placeholders_at_render_time() -> None:
     assert "fresh weather 1" in renderer.llm_prompts[0]
     assert "<timestamp>" not in renderer.llm_prompts[0]
     assert streamdetails.media_type == MediaType.SOUND_EFFECT
-    assert streamdetails.stream_type == StreamType.HTTP
+    assert streamdetails.stream_type == StreamType.LOCAL_FILE
     assert streamdetails.duration == 9
-    assert streamdetails.expiration == 60
+    assert streamdetails.expiration == CLIP_COPY_LIFETIME
     assert streamdetails.can_seek is False
     assert streamdetails.allow_seek is False
 
@@ -325,7 +335,7 @@ async def test_cached_media_remints_once_it_expires() -> None:
 
     await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
     cached = cast("Any", renderer)._media_cache["sess_001"]
-    cached.minted_at -= CLIP_STREAMDETAILS_EXPIRATION + 1
+    cached.minted_at -= cached.lifetime + 1
 
     await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
 
@@ -333,14 +343,14 @@ async def test_cached_media_remints_once_it_expires() -> None:
     assert engine.provider.get_tts_message.await_count == 2
 
 
-async def test_a_late_cache_hit_expires_with_the_url_it_serves() -> None:
-    """A hit late in the window hands out the url's remaining life, not a fresh full window."""
+async def test_a_late_cache_hit_expires_with_the_media_it_serves() -> None:
+    """A hit late in the window hands out the media's remaining life, not a fresh window."""
     renderer = _tts_renderer("http://example.test/api/tts_proxy/abc123.mp3")
     _attach_queue(renderer, [_clip_item("sess_001")])
 
     await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
     cached = cast("Any", renderer)._media_cache["sess_001"]
-    cached.minted_at -= 45
+    cached.minted_at -= cached.lifetime - 15
 
     late = await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
 
@@ -356,13 +366,13 @@ async def test_a_cache_hit_with_no_useful_life_left_remints() -> None:
 
     await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
     cached = cast("Any", renderer)._media_cache["sess_001"]
-    cached.minted_at -= CLIP_STREAMDETAILS_EXPIRATION - 2
+    cached.minted_at -= cached.lifetime - 2
 
     fresh = await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
 
     engine = cast("Any", renderer)._get_tts_engine.return_value
     assert engine.provider.get_tts_message.await_count == 2
-    assert fresh.expiration == CLIP_STREAMDETAILS_EXPIRATION
+    assert fresh.expiration == CLIP_COPY_LIFETIME
 
 
 async def test_expired_cache_entries_are_pruned_on_the_next_mint() -> None:
@@ -372,7 +382,7 @@ async def test_expired_cache_entries_are_pruned_on_the_next_mint() -> None:
 
     await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
     media_cache = cast("Any", renderer)._media_cache
-    media_cache["sess_001"].minted_at -= CLIP_STREAMDETAILS_EXPIRATION + 1
+    media_cache["sess_001"].minted_at -= media_cache["sess_001"].lifetime + 1
     await renderer.get_stream_details("sess_002", MediaType.SOUND_EFFECT)
 
     assert set(media_cache) == {"sess_002"}
@@ -388,7 +398,8 @@ async def test_post_plans_are_pruned_with_their_expired_media(tmp_path: Path) ->
     await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
     expired_plan = SimpleNamespace(staged=str(staged))
     cast("Any", renderer)._post_plans = {"sess_001": expired_plan, "sess_003": None}
-    cast("Any", renderer)._media_cache["sess_001"].minted_at -= CLIP_STREAMDETAILS_EXPIRATION + 1
+    expired_media = cast("Any", renderer)._media_cache["sess_001"]
+    expired_media.minted_at -= expired_media.lifetime + 1
     await renderer.get_stream_details("sess_002", MediaType.SOUND_EFFECT)
 
     assert set(cast("Any", renderer)._post_plans) == {"sess_003"}
@@ -427,7 +438,8 @@ async def test_render_tts_media_falls_back_without_language_on_rejection() -> No
 
     streamdetails = await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
 
-    assert streamdetails.path == "http://example.test/api/tts_proxy/abc123.mp3"
+    assert renderer.copied_urls == ["http://example.test/api/tts_proxy/abc123.mp3"]
+    assert streamdetails.path == "/media/copies/ma_ai_radio_clip_1.wav"
     assert engine.provider.get_tts_message.await_count == 2
     first_call, second_call = engine.provider.get_tts_message.await_args_list
     assert first_call.kwargs["language"] == "en-US"
@@ -993,7 +1005,7 @@ async def test_a_measured_clip_is_lifted_to_the_target_plus_the_boost() -> None:
 
     assert streamdetails.stream_type == StreamType.CUSTOM
     assert streamdetails.decoded_audio_format == TTS_CLIP_PCM_FORMAT
-    assert streamdetails.audio_format.content_type == ContentType.MP3
+    assert streamdetails.audio_format.content_type == ContentType.WAV
     assert streamdetails.data.gain_db == pytest.approx(7.0)
 
 
@@ -1020,7 +1032,7 @@ async def test_the_clip_is_evened_out_and_lifted_before_it_is_limited(
 
     assert chunks == [b"pcm"]
     assert captured["audio_input"] == streamdetails.path
-    assert captured["input_format"].content_type == ContentType.MP3
+    assert captured["input_format"].content_type == ContentType.WAV
     assert captured["output_format"] == TTS_CLIP_PCM_FORMAT
     assert captured["filter_params"] == [
         TTS_SPEECHNORM_FILTER,
@@ -1072,7 +1084,7 @@ async def test_clip_plays_untouched_when_the_queue_does_not_normalize() -> None:
 
     streamdetails = await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
 
-    assert streamdetails.stream_type == StreamType.HTTP
+    assert streamdetails.stream_type == StreamType.LOCAL_FILE
     assert streamdetails.decoded_audio_format is None
     assert streamdetails.data is None
 
@@ -1086,7 +1098,7 @@ async def test_clip_plays_untouched_when_it_could_not_be_measured() -> None:
     streamdetails = await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
 
     assert renderer.measure_calls
-    assert streamdetails.stream_type == StreamType.HTTP
+    assert streamdetails.stream_type == StreamType.LOCAL_FILE
     assert streamdetails.data is None
 
 
@@ -1209,7 +1221,7 @@ async def test_clip_plays_untouched_when_tracks_are_not_normalized() -> None:
 
     streamdetails = await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
 
-    assert streamdetails.stream_type == StreamType.HTTP
+    assert streamdetails.stream_type == StreamType.LOCAL_FILE
     assert streamdetails.data is None
 
 
@@ -1586,3 +1598,116 @@ async def test_the_same_jingle_does_not_open_two_breaks_in_a_row() -> None:
 
     picked = [item.extra_attributes[ATTR_JINGLE] for item in items]
     assert all(first != second for first, second in itertools.pairwise(picked))
+
+
+class CopyingRenderer(DummyRenderer):
+    """Harness that runs the mixin's real local copy against a stand-in ffmpeg."""
+
+    _keep_local_copy = AIRadioRenderMixin._keep_local_copy
+
+
+def _fake_ffmpeg(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    audio_bytes: int,
+    returncode: int = 0,
+    report: bytes = b"",
+    error: Exception | None = None,
+) -> list[tuple[str, ...]]:
+    """Stand in for the ffmpeg run that copies a clip, writing the given amount of audio."""
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_check_output(*args: str, **_kwargs: Any) -> tuple[int, bytes]:
+        calls.append(args)
+        if error is not None:
+            raise error
+        Path(args[-1]).write_bytes(b"\0" * audio_bytes)
+        return returncode, report
+
+    monkeypatch.setattr(
+        "music_assistant.providers.ai_radio.rendering.check_output", fake_check_output
+    )
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    return calls
+
+
+async def test_a_tts_link_is_copied_once_and_played_locally(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The clip is read from the link a single time and airs from the local copy."""
+    calls = _fake_ffmpeg(monkeypatch, tmp_path, audio_bytes=MIN_CLIP_COPY_BYTES * 10)
+    renderer = CopyingRenderer()
+
+    path = await renderer._keep_local_copy("http://ha.invalid/api/tts_proxy/1.mp3")
+
+    assert Path(path).parent == tmp_path
+    assert Path(path).name.startswith(CLIP_COPY_PREFIX)
+    assert calls[0][calls[0].index("-i") + 1] == "http://ha.invalid/api/tts_proxy/1.mp3"
+    assert calls[0][calls[0].index("-ar") + 1] == "48000"
+
+
+async def test_a_transfer_that_errors_after_the_audio_keeps_the_clip(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An error closing the transfer after the last byte no longer throws the break away."""
+    _fake_ffmpeg(
+        monkeypatch,
+        tmp_path,
+        audio_bytes=MIN_CLIP_COPY_BYTES * 10,
+        returncode=1,
+        report=b"[in#0/mp3] Error during demuxing: Input/output error",
+    )
+
+    path = await CopyingRenderer()._keep_local_copy("http://ha.invalid/api/tts_proxy/1.mp3")
+
+    assert Path(path).is_file()
+
+
+async def test_a_transfer_without_audio_fails_and_leaves_nothing_behind(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No speech arrived, so the clip fails, with the engine pointed at on a server error."""
+    _fake_ffmpeg(
+        monkeypatch,
+        tmp_path,
+        audio_bytes=44,
+        returncode=1,
+        report=b"http://ha.invalid/x: Server returned 5XX Server Error reply",
+    )
+
+    with pytest.raises(MusicAssistantError, match="The TTS engine failed"):
+        await CopyingRenderer()._keep_local_copy("http://ha.invalid/api/tts_proxy/1.mp3")
+
+    assert list(tmp_path.glob(f"{CLIP_COPY_PREFIX}*")) == []
+
+
+async def test_a_stalled_transfer_fails_and_leaves_nothing_behind(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A fetch that times out fails the clip instead of hanging it."""
+    _fake_ffmpeg(monkeypatch, tmp_path, audio_bytes=0, error=TimeoutError())
+
+    with pytest.raises(MusicAssistantError, match="could not be fetched"):
+        await CopyingRenderer()._keep_local_copy("http://ha.invalid/api/tts_proxy/1.mp3")
+
+    assert list(tmp_path.glob(f"{CLIP_COPY_PREFIX}*")) == []
+
+
+async def test_copies_left_from_an_earlier_run_are_cleaned_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A copy older than its lifetime is deleted the next time a clip is copied."""
+    _fake_ffmpeg(monkeypatch, tmp_path, audio_bytes=MIN_CLIP_COPY_BYTES * 10)
+    stale = tmp_path / f"{CLIP_COPY_PREFIX}old.wav"
+    stale.write_bytes(b"old")
+    old = time.time() - CLIP_COPY_LIFETIME - 10
+    os.utime(stale, (old, old))
+    unrelated = tmp_path / "someone_elses.wav"
+    unrelated.write_bytes(b"keep")
+    os.utime(unrelated, (old, old))
+
+    await CopyingRenderer()._keep_local_copy("http://ha.invalid/api/tts_proxy/1.mp3")
+
+    assert not stale.exists()
+    assert unrelated.exists()
