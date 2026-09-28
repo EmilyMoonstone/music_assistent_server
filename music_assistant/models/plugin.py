@@ -71,6 +71,20 @@ class TTSEngine(PluginEngine):
     """An engine that renders speech, invoked through ``PluginProvider.get_tts_message``."""
 
 
+@dataclass(kw_only=True)
+class LeadIn:
+    """
+    How the track before blends into one of a plugin's items.
+
+    Returned by ``PluginProvider.get_lead_in``. Server-side only: never serialized to clients.
+    """
+
+    seconds: float  # length of the overlap
+    # False starts the plugin's item at full level while the track before fades out under it
+    # (a talk-up over the outro); True fades it in as an ordinary crossfade does
+    fade_in: bool = True
+
+
 class PluginProvider(Provider):
     """
     Base representation of a Plugin for Music Assistant.
@@ -195,6 +209,18 @@ class PluginProvider(Provider):
         Return whether this plugin crossfades the live audio it delivers, if known.
 
         :param streamdetails: Stream details of the active AudioSource.
+        """
+        return None
+
+    def get_lead_in(self, streamdetails: StreamDetails) -> LeadIn | None:
+        """
+        Return how the track before may blend into this plugin's item, or None for a cut.
+
+        Only asked when the queue crossfades at all; the overlap then replaces the
+        configured crossfade for this one transition, and is a standard fade, as the item
+        is not analysed for a smart one. Called on the streaming path, so it must not block.
+
+        :param streamdetails: Stream details of this plugin's item about to play.
         """
         return None
 

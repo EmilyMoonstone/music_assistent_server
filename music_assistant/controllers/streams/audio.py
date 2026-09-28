@@ -163,6 +163,7 @@ from music_assistant.helpers.util import (
     remove_file,
 )
 from music_assistant.models.music_provider import MusicProvider, ProviderStreamLimitError
+from music_assistant.models.plugin import LeadIn, PluginProvider
 
 if TYPE_CHECKING:
     from music_assistant_models.media_items import MediaItemType, ProviderMapping
@@ -172,7 +173,6 @@ if TYPE_CHECKING:
 
     from music_assistant.mass import MusicAssistant
     from music_assistant.models.player import Player
-    from music_assistant.models.plugin import PluginProvider
     from music_assistant.models.provider import Provider
 
 # ruff: noqa: PLR0915
@@ -410,8 +410,11 @@ class _IncomingFadePrefetcher:
         if (
             next_item is None
             or next_item.queue_item_id == queue_item.queue_item_id
-            or next_item.media_type != MediaType.TRACK
             or (streamdetails := next_item.streamdetails) is None
+            or (
+                next_item.media_type != MediaType.TRACK
+                and self._audio.plugin_lead_in(next_item) is None
+            )
             # without a duration the read below cannot be kept clear of the track's end
             or not streamdetails.duration
             or (audio_buffer := cast("AudioBuffer | None", streamdetails.buffer)) is None
@@ -419,8 +422,11 @@ class _IncomingFadePrefetcher:
             or not audio_buffer.is_valid()
         ):
             return
+        lead_in = self._audio.plugin_lead_in(next_item)
         overlap: float = (
-            SMART_CROSSFADE_DURATION
+            lead_in.seconds
+            if lead_in is not None
+            else SMART_CROSSFADE_DURATION
             if crossfade_mode == CrossfadeMode.SMART_CROSSFADE
             else standard_crossfade_duration
         )
@@ -2159,6 +2165,7 @@ class StreamsAudio:
                         standard_crossfade_duration,
                         fade_out_seconds=len(tail_window) / pcm_format.pcm_sample_size,
                         playback_speed=fade_in_playback_speed,
+                        lead_in=self.plugin_lead_in(next_queue_item),
                     )
                     crossfade_allowed = transition_mode != CrossfadeMode.DISABLED
             if not crossfade_allowed:
@@ -2180,6 +2187,7 @@ class StreamsAudio:
                 # initialized before the try block — the except handler reads it
                 first_part_written = 0
                 try:
+                    next_lead_in = self.plugin_lead_in(next_queue_item)
                     smart_fade = await self.smart_fades_mixer.build(
                         fade_in_streamdetails=next_queue_item.streamdetails,
                         fade_out_streamdetails=streamdetails,
@@ -2188,6 +2196,7 @@ class StreamsAudio:
                         mode=transition_mode,
                         fade_out_data=fade_out_data,
                         fade_in_bytes_len=fade_in_buffer_size,
+                        fade_in=next_lead_in.fade_in if next_lead_in else True,
                     )
                     # the mixer degrades to a standard fade when the smart one cannot be planned
                     applied_mode = (
@@ -2520,7 +2529,13 @@ class StreamsAudio:
                 # source still gets its fade decided from what its boundary can
                 # actually deliver (see _select_buffered_crossfade)
                 if queue_track.media_type != MediaType.TRACK:
-                    item_crossfade_mode = CrossfadeMode.DISABLED
+                    # only the fade into it: crossfade_allowed keeps it from fading out
+                    item_crossfade_mode = (
+                        CrossfadeMode.STANDARD_CROSSFADE
+                        if self.mass.streams.get_crossfade_mode(queue) != CrossfadeMode.DISABLED
+                        and self.plugin_lead_in(queue_track) is not None
+                        else CrossfadeMode.DISABLED
+                    )
                 else:
                     item_crossfade_mode = self.mass.streams.get_crossfade_mode(queue)
                     standard_crossfade_duration = self.mass.config.get_raw_core_config_value(
@@ -2599,6 +2614,7 @@ class StreamsAudio:
                             standard_crossfade_duration,
                             fade_out_seconds=len(last_fadeout_part) / pcm_sample_size,
                             playback_speed=track_playback_speed,
+                            lead_in=self.plugin_lead_in(queue_track),
                         )
                     if transition_mode == CrossfadeMode.DISABLED:
                         # nothing to fade into: flush the held-back tail of the previous track
@@ -2631,6 +2647,11 @@ class StreamsAudio:
                             mode=transition_mode,
                             fade_out_data=last_fadeout_part,
                             fade_in_bytes_len=incoming_crossfade_size,
+                            fade_in=(
+                                lead_in.fade_in
+                                if (lead_in := self.plugin_lead_in(queue_track))
+                                else True
+                            ),
                         )
                         build_seconds = asyncio.get_event_loop().time() - build_started
                         timing_info = crossfade_smart_fade.timing_info
@@ -3109,8 +3130,8 @@ class StreamsAudio:
         if not next_item:
             # there is no next item!
             return False
-        # check if next item is a track
-        if next_item.media_type != MediaType.TRACK:
+        # check if next item is a track, or a plugin item that asks for a lead-in
+        if next_item.media_type != MediaType.TRACK and self.plugin_lead_in(next_item) is None:
             self.logger.debug("Skipping crossfade: next item is not a track")
             return False
         # an item picks up its library album only once it is loaded, so a queue fed straight
@@ -4153,13 +4174,37 @@ class StreamsAudio:
             # the buffer appears when the source's session starts producing
             await asyncio.sleep(0.1)
 
+    def plugin_lead_in(self, queue_item: QueueItem | None) -> LeadIn | None:
+        """
+        Return the lead-in a plugin asks for into its item, or None when it wants a cut.
+
+        :param queue_item: The incoming item; only a plugin's resolved sound effect has one.
+        """
+        if queue_item is None or queue_item.media_type != MediaType.SOUND_EFFECT:
+            return None
+        if (streamdetails := queue_item.streamdetails) is None:
+            return None
+        provider = self.mass.get_provider(streamdetails.provider)
+        if not isinstance(provider, PluginProvider):
+            return None
+        try:
+            lead_in = provider.get_lead_in(streamdetails)
+        except Exception as err:
+            # a plugin's mistake costs the transition, never the stream
+            self.logger.warning(
+                "Plugin %s failed to give a lead-in: %s", streamdetails.provider, err
+            )
+            return None
+        return lead_in if lead_in is not None and lead_in.seconds > 0 else None
+
     def _select_buffered_crossfade(
         self,
         streamdetails: StreamDetails,
         crossfade_mode: CrossfadeMode,
-        standard_crossfade_duration: int,
+        standard_crossfade_duration: float,
         fade_out_seconds: float,
         playback_speed: float = 1.0,
+        lead_in: LeadIn | None = None,
     ) -> tuple[CrossfadeMode, float]:
         """
         Select the crossfade this boundary can carry.
@@ -4173,9 +4218,15 @@ class StreamsAudio:
         :param standard_crossfade_duration: Configured standard overlap in seconds.
         :param fade_out_seconds: Held-back outgoing tail in seconds.
         :param playback_speed: Incoming track playback-speed multiplier.
+        :param lead_in: The lead-in a plugin asks for into its incoming item, if any; it
+            replaces the configured fade with a standard one of its own length.
         :return: Effective mode and fade-in duration in seconds.
         """
         audio_buffer = streamdetails.buffer
+        if crossfade_mode != CrossfadeMode.DISABLED and lead_in is not None:
+            # the plugin sizes its own transition; its item is not analysed for a smart one
+            crossfade_mode = CrossfadeMode.STANDARD_CROSSFADE
+            standard_crossfade_duration = lead_in.seconds
         if (
             crossfade_mode == CrossfadeMode.DISABLED
             or playback_speed <= 0
