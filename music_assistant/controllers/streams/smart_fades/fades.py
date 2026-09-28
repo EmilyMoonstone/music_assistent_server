@@ -359,6 +359,7 @@ class StandardCrossFade(SmartFade):
         logger: logging.Logger,
         crossfade_duration: float = 10.0,
         trailing_silence_bytes: int = 0,
+        fade_in: bool = True,
     ) -> None:
         """
         Initialize StandardCrossFade.
@@ -367,10 +368,13 @@ class StandardCrossFade(SmartFade):
         :param crossfade_duration: Length of the crossfade overlap in seconds.
         :param trailing_silence_bytes: Trailing silence in the outgoing tail that
             ``apply()`` slices off before crossfading.
+        :param fade_in: False plays the incoming audio at full level from its first sample
+            while the outgoing audio fades out under it.
         """
         super().__init__(logger)
         self.crossfade_duration = crossfade_duration
         self.trailing_silence_bytes = trailing_silence_bytes
+        self.fade_in = fade_in
         self.crossfade_size: int = 0
 
     def build(
@@ -403,7 +407,11 @@ class StandardCrossFade(SmartFade):
         # the streaming variant, so a fade-in that is still arriving (realtime
         # source) is blended and delivered as it comes in
         self.filters = [
-            StreamingCrossfadeFilter(logger=self.logger, crossfade_samples=crossfade_samples),
+            StreamingCrossfadeFilter(
+                logger=self.logger,
+                crossfade_samples=crossfade_samples,
+                fadein_curve="qsin" if self.fade_in else "nofade",
+            ),
         ]
 
     async def apply(

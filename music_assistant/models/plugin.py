@@ -87,6 +87,20 @@ class VoiceOver:
     offset: float = 0.0  # second of the file to start reading from
 
 
+@dataclass(kw_only=True)
+class LeadIn:
+    """
+    How the track before blends into one of a plugin's items.
+
+    Returned by ``PluginProvider.get_lead_in``. Server-side only: never serialized to clients.
+    """
+
+    seconds: float  # length of the overlap
+    # False starts the plugin's item at full level while the track before fades out under it
+    # (a talk-up over the outro); True fades it in as an ordinary crossfade does
+    fade_in: bool = True
+
+
 class PluginProvider(Provider):
     """
     Base representation of a Plugin for Music Assistant.
@@ -239,6 +253,18 @@ class PluginProvider(Provider):
         :param aired: True when the next item streamed to its end with the voice mixed in,
             False when it could not air with this playback.
         """
+
+    def get_lead_in(self, streamdetails: StreamDetails) -> LeadIn | None:
+        """
+        Return how the track before may blend into this plugin's item, or None for a cut.
+
+        Only asked when the queue crossfades at all; the overlap then replaces the
+        configured crossfade for this one transition, and is a standard fade, as the item
+        is not analysed for a smart one. Called on the streaming path, so it must not block.
+
+        :param streamdetails: Stream details of this plugin's item about to play.
+        """
+        return None
 
     async def on_source_control(
         self,

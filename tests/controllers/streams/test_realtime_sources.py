@@ -514,6 +514,7 @@ async def test_smartfade_realtime_current_item_fades_once_its_source_is_done(
     current_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="current",
+        media_type=MediaType.TRACK,
         name="Current",
         streamdetails=current_details,
         extra_attributes={},
@@ -521,6 +522,7 @@ async def test_smartfade_realtime_current_item_fades_once_its_source_is_done(
     next_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="next",
+        media_type=MediaType.TRACK,
         name="Next",
         streamdetails=next_details,
         extra_attributes={},
@@ -611,6 +613,7 @@ async def _run_smartfade_boundary(
     current_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="current",
+        media_type=MediaType.TRACK,
         name="Current",
         streamdetails=SimpleNamespace(
             duration=16,
@@ -631,6 +634,7 @@ async def _run_smartfade_boundary(
     next_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="next",
+        media_type=MediaType.TRACK,
         name="Next",
         streamdetails=next_details,
         extra_attributes={},
@@ -729,6 +733,7 @@ async def test_the_live_post_handover_streams_into_the_next_request(
     current_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="current",
+        media_type=MediaType.TRACK,
         name="Current",
         streamdetails=current_details,
         extra_attributes={},
@@ -736,6 +741,7 @@ async def test_the_live_post_handover_streams_into_the_next_request(
     next_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="next",
+        media_type=MediaType.TRACK,
         name="Next",
         streamdetails=next_details,
         extra_attributes={},
@@ -941,6 +947,7 @@ async def test_smartfade_a_source_still_delivering_hands_over_gapless(
     current_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="current",
+        media_type=MediaType.TRACK,
         name="Current",
         streamdetails=current_details,
         extra_attributes={},
@@ -948,6 +955,7 @@ async def test_smartfade_a_source_still_delivering_hands_over_gapless(
     next_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="next",
+        media_type=MediaType.TRACK,
         name="Next",
         streamdetails=next_details,
         extra_attributes={},
@@ -1157,6 +1165,7 @@ async def test_smartfade_unaligned_chunks_still_crossfade(
     current_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="current",
+        media_type=MediaType.TRACK,
         name="Current",
         streamdetails=current_details,
         extra_attributes={},
@@ -1164,6 +1173,7 @@ async def test_smartfade_unaligned_chunks_still_crossfade(
     next_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="next",
+        media_type=MediaType.TRACK,
         name="Next",
         streamdetails=next_details,
         extra_attributes={},
@@ -1246,6 +1256,7 @@ async def test_smartfade_short_remainder_still_crossfades(
     current_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="current",
+        media_type=MediaType.TRACK,
         name="Current",
         streamdetails=current_details,
         extra_attributes={},
@@ -1253,6 +1264,7 @@ async def test_smartfade_short_remainder_still_crossfades(
     next_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="next",
+        media_type=MediaType.TRACK,
         name="Next",
         streamdetails=next_details,
         extra_attributes={},
@@ -1340,6 +1352,7 @@ async def test_smartfade_stub_remainder_does_not_crossfade(
     current_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="current",
+        media_type=MediaType.TRACK,
         name="Current",
         streamdetails=current_details,
         extra_attributes={},
@@ -1347,6 +1360,7 @@ async def test_smartfade_stub_remainder_does_not_crossfade(
     next_item = SimpleNamespace(
         queue_id="queue-1",
         queue_item_id="next",
+        media_type=MediaType.TRACK,
         name="Next",
         streamdetails=next_details,
         extra_attributes={},

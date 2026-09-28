@@ -233,6 +233,12 @@ JINGLE_CHOICE_INSTRUCTION = (
     "'JINGLE: <number>' and write the script after it. You may pick up on the jingle's words, "
     "but do not repeat them. The options:"
 )
+# how the song before blends into a break: a hard cut, a crossfade, or a talk-up where the
+# break starts at full level over the song's fading outro
+LEAD_IN_MODES = ("cut", "crossfade", "talk_up")
+DEFAULT_LEAD_IN = "cut"
+DEFAULT_LEAD_IN_SECONDS = 3
+LEAD_IN_SECONDS_RANGE = (1, 8)
 # how far below the voice the bed sits, in dB
 DEFAULT_MUSIC_BED_LEVEL = -18
 MUSIC_BED_LEVEL_RANGE = (-40, -6)
