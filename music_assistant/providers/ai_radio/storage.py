@@ -16,8 +16,18 @@ from music_assistant_models.errors import InvalidDataError
 
 from music_assistant.helpers.json import async_json_dumps, async_json_loads
 
-from .constants import EMPTY_SECTION_ID, MERGE_SECTION_PROMPT, VALID_WEB_SEARCH_MODES
-from .helpers import slugify
+from .constants import (
+    AI_ORDER_MAX_TRACKS_RANGE,
+    DEFAULT_AI_ORDER_MAX_TRACKS,
+    EMPTY_SECTION_ID,
+    MERGE_SECTION_PROMPT,
+    TRACK_ORDER_AI,
+    TRACK_ORDER_MODES,
+    TRACK_ORDER_PLAYLIST,
+    TRACK_ORDER_SHUFFLE,
+    VALID_WEB_SEARCH_MODES,
+)
+from .helpers import coerce_int, slugify
 
 _slugify = slugify
 
@@ -220,6 +230,16 @@ class AIRadioStorageMixin:
         if host_id not in self._hosts:
             raise InvalidDataError(f"Station references unknown host: {host_id}")
 
+        shuffle = bool(station.get("shuffle_source_tracks", True))
+        # a station saved before the running order existed keeps ordering the way it did
+        track_order = str(station.get("track_order") or "").strip().lower()
+        if track_order not in TRACK_ORDER_MODES:
+            track_order = TRACK_ORDER_SHUFFLE if shuffle else TRACK_ORDER_PLAYLIST
+        # the AI orders a random pick of the playlist, so that pick is always shuffled
+        shuffle = track_order in (TRACK_ORDER_AI, TRACK_ORDER_SHUFFLE)
+        low, high = AI_ORDER_MAX_TRACKS_RANGE
+        max_tracks = coerce_int(station.get("ai_order_max_tracks"), DEFAULT_AI_ORDER_MAX_TRACKS)
+
         def _require_number(field: str, raw: Any, default: float, cast: type) -> Any:
             if raw is None or raw == "":
                 return default
@@ -242,8 +262,11 @@ class AIRadioStorageMixin:
                     "max_duration_minutes", station.get("max_duration_minutes"), 0.0, float
                 ),
             ),
-            "shuffle_source_tracks": bool(station.get("shuffle_source_tracks", True)),
+            "shuffle_source_tracks": shuffle,
             "host_id": host_id,
+            "track_order": track_order,
+            "ai_order_max_tracks": min(high, max(low, max_tracks)),
+            "ai_order_prompt": str(station.get("ai_order_prompt") or "").strip(),
         }
 
     def _validate_section_order(
@@ -393,6 +416,9 @@ class AIRadioStorageMixin:
             "max_duration_minutes": 0,
             "shuffle_source_tracks": True,
             "host_id": str(hosts[0]["id"]) if hosts else "default_host",
+            "track_order": TRACK_ORDER_SHUFFLE,
+            "ai_order_max_tracks": DEFAULT_AI_ORDER_MAX_TRACKS,
+            "ai_order_prompt": "",
         }
 
     def _sync_write_json_file(self, target: Path, content: str) -> None:

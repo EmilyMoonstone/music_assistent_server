@@ -134,6 +134,31 @@ NO_WEATHER_DATA_INSTRUCTION = (
     "(no weather data available - leave out all weather talk, do not invent a forecast)"
 )
 
+# how a show orders its songs: shuffled, in the playlist's own order, or as a running order
+# the AI puts together like a music director would
+TRACK_ORDER_SHUFFLE = "shuffle"
+TRACK_ORDER_PLAYLIST = "playlist"
+TRACK_ORDER_AI = "ai"
+TRACK_ORDER_MODES = (TRACK_ORDER_SHUFFLE, TRACK_ORDER_PLAYLIST, TRACK_ORDER_AI)
+# the AI orders a random pick of this many songs, which keeps the prompt, and the wait
+# before the show starts, bounded for playlists of any size
+DEFAULT_AI_ORDER_MAX_TRACKS = 100
+AI_ORDER_MAX_TRACKS_RANGE = (5, 500)
+DEFAULT_AI_ORDER_PROMPT = (
+    "You are the music director of this station and put together the running order of "
+    "the show. The show starts at <timestamp>: open with songs that suit that time of day, "
+    "and let the energy follow how the hours go. Keep it varied: never play the same artist "
+    "twice in a row, and change genre, era and tempo now and then. Still let neighbouring "
+    "songs belong together, so every transition feels intended through a shared mood, "
+    "tempo, sound or story. Build small arcs instead of a random walk."
+)
+MAX_LISTENER_WISH_CHARS = 500
+# appended to every running-order request, custom prompts included, so the reply parses
+AI_ORDER_REPLY_INSTRUCTION = (
+    "Reply with a JSON array of the song numbers in the order they should play, every "
+    "number exactly once, and nothing else."
+)
+
 # HA drops a tts_proxy token 60s after its last use at the lowest configurable time_memory
 CLIP_STREAMDETAILS_EXPIRATION = 60
 
