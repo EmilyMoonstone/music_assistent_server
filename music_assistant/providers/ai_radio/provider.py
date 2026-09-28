@@ -32,6 +32,8 @@ from .constants import (
     ENGINE_DISCOVERY_TIMEOUT,
     ENGINE_RECHECK_GRACE,
     ENGINE_RETRY_DELAY,
+    JINGLE_FILE_EXTENSIONS,
+    JINGLE_MEDIA_ROOT,
     LOUDNESS_MEASURE_TIMEOUT,
     MAX_FINISHED_SESSIONS,
     MAX_LISTENER_WISH_CHARS,
@@ -74,6 +76,9 @@ class AIRadioProvider(
     PluginProvider,
 ):
     """Implementation of the AI Radio plugin provider."""
+
+    # where jingles are browsed from, a class attribute so tests can point it elsewhere
+    _jingle_media_root: str = JINGLE_MEDIA_ROOT
 
     def __init__(
         self,
@@ -151,6 +156,7 @@ class AIRadioProvider(
             ("ai_radio/memory/get", self.get_break_memory),
             ("ai_radio/memory/clear", self.clear_break_memory),
             ("ai_radio/jingles/inspect", self.inspect_jingle),
+            ("ai_radio/jingles/browse", self.browse_jingles),
             ("ai_radio/start", self.start_run),
             ("ai_radio/stop", self.stop_run),
             ("ai_radio/status", self.get_status),
@@ -389,6 +395,31 @@ class AIRadioProvider(
             "duration": tags.duration,
             "title": tags.title or "",
             "text": jingle_text_from_lyrics(tags.lyrics),
+        }
+
+    async def browse_jingles(self, path: str | None = None) -> dict[str, Any]:
+        """
+        List the folders and sound files of a folder in the media folder, to pick jingles from.
+
+        :param path: The folder to list, the media folder itself when omitted.
+        """
+        root = Path(self._jingle_media_root)
+        target = Path(path or root)
+        # resolved so a ".." or a symlink cannot lead the listing out of the media folder
+        resolved_root, resolved = await asyncio.gather(
+            asyncio.to_thread(root.resolve), asyncio.to_thread(target.resolve)
+        )
+        if not resolved.is_relative_to(resolved_root):
+            raise InvalidDataError(f"Jingles can only be picked from {root}")
+        try:
+            folders, files = await asyncio.to_thread(_list_sound_folder, resolved)
+        except (FileNotFoundError, NotADirectoryError) as err:
+            raise InvalidDataError(f"Folder not found: {target}") from err
+        return {
+            "path": str(resolved),
+            "parent": str(resolved.parent) if resolved != resolved_root else None,
+            "folders": [{"name": item.name, "path": str(item)} for item in folders],
+            "files": [{"name": item.name, "path": str(item)} for item in files],
         }
 
     async def host_template(self) -> dict[str, Any]:
@@ -645,3 +676,19 @@ class AIRadioProvider(
             raise KeyError("No active AI Radio run found")
 
         return max(running, key=lambda item: item.created_at)
+
+
+def _list_sound_folder(folder: Path) -> tuple[list[Path], list[Path]]:
+    """Return the visible subfolders and sound files of a folder, each sorted by name."""
+    folders: list[Path] = []
+    files: list[Path] = []
+    for entry in folder.iterdir():
+        if entry.name.startswith("."):
+            continue
+        if entry.is_dir():
+            folders.append(entry)
+        elif entry.suffix.lower() in JINGLE_FILE_EXTENSIONS:
+            files.append(entry)
+    return sorted(folders, key=lambda item: item.name.lower()), sorted(
+        files, key=lambda item: item.name.lower()
+    )

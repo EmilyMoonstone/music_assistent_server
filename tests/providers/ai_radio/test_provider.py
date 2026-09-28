@@ -437,6 +437,55 @@ async def test_inspecting_a_jingle_reads_its_words_from_the_lyrics(
         await provider.inspect_jingle("floskeln.mp3")
 
 
+@pytest.fixture
+def media(provider: Any, tmp_path: Path) -> Path:
+    """Point the jingle browser at a media folder holding a few jingles and other files."""
+    root = tmp_path / "media"
+    jingles = root / "ai_radio" / "jingles"
+    jingles.mkdir(parents=True)
+    for name in ("Neues aus dem Untergrund.mp3", "a calm one.M4A", "cover.jpg", ".hidden.mp3"):
+        (jingles / name).write_bytes(b"")
+    (root / "movies").mkdir()
+    (tmp_path / "secret.mp3").write_bytes(b"")
+    provider._jingle_media_root = str(root)
+    return root
+
+
+@pytest.mark.asyncio
+async def test_browsing_starts_at_the_media_folder(provider: Any, media: Path) -> None:
+    """Without a path the media folder is listed, and it has no parent to go up to."""
+    listing = await provider.browse_jingles()
+
+    assert listing["path"] == str(media.resolve())
+    assert listing["parent"] is None
+    assert [folder["name"] for folder in listing["folders"]] == ["ai_radio", "movies"]
+    assert listing["files"] == []
+
+
+@pytest.mark.asyncio
+async def test_browsing_a_folder_lists_only_its_sound_files(provider: Any, media: Path) -> None:
+    """Pictures and hidden files are left out, sounds are sorted by name."""
+    folder = media / "ai_radio" / "jingles"
+
+    listing = await provider.browse_jingles(str(folder))
+
+    assert [item["name"] for item in listing["files"]] == [
+        "a calm one.M4A",
+        "Neues aus dem Untergrund.mp3",
+    ]
+    assert listing["files"][1]["path"] == str(folder.resolve() / "Neues aus dem Untergrund.mp3")
+    assert listing["parent"] == str((media / "ai_radio").resolve())
+
+
+@pytest.mark.asyncio
+async def test_browsing_never_leaves_the_media_folder(provider: Any, media: Path) -> None:
+    """A path outside the media folder, or one climbing out of it, is refused."""
+    with pytest.raises(InvalidDataError):
+        await provider.browse_jingles(str(media / ".."))
+    with pytest.raises(InvalidDataError):
+        await provider.browse_jingles(str(media / "missing"))
+
+
 @pytest.mark.asyncio
 async def test_a_client_unaware_of_effects_does_not_wipe_them(provider: Any) -> None:
     """Saving a host without any effects key keeps the effects it already had."""
@@ -1064,6 +1113,7 @@ async def test_stations_are_played_by_everyone_and_edited_by_admins() -> None:
         "ai_radio/memory/clear",
         # probes a path on the server, so it is reserved for those who configure the plugin
         "ai_radio/jingles/inspect",
+        "ai_radio/jingles/browse",
     ):
         assert scopes[command] == Scope.CONFIG_PROVIDERS_WRITE
 
