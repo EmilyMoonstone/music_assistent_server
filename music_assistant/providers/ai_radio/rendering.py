@@ -6,7 +6,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import tempfile
+import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.enums import ContentType, StreamType, VolumeNormalizationMode
@@ -43,11 +47,16 @@ from .constants import (
     ATTR_SESSION_ID,
     ATTR_WEATHER_REQUIRED,
     ATTR_WEB_SEARCH_MODE,
+    CLIP_COPY_FORMAT,
+    CLIP_COPY_LIFETIME,
+    CLIP_COPY_PREFIX,
+    CLIP_FETCH_TIMEOUT,
     CLIP_STREAMDETAILS_EXPIRATION,
     CONF_TTS_LOUDNESS_BOOST,
     DEFAULT_TTS_LOUDNESS_BOOST,
     DEFERRED_PLACEHOLDERS,
     LOUDNESS_MEASURE_TIMEOUT,
+    MIN_CLIP_COPY_BYTES,
     MIN_CLIP_MEDIA_LIFETIME,
     MIN_LOUDNESS_REFERENCE_SECONDS,
     NO_WEATHER_DATA_INSTRUCTION,
@@ -81,6 +90,8 @@ class _CachedClipMedia:
     duration: int | None
     minted_at: float
     loudness: float | None
+    # seconds the media stays usable: a minute for a TTS link, an hour for a local copy
+    lifetime: int = CLIP_STREAMDETAILS_EXPIRATION
 
 
 @dataclass(slots=True)
@@ -202,22 +213,30 @@ class AIRadioRenderMixin:
         path, stream_type, audio_format, duration, loudness = await self._mint_clip_media(
             queue_item, text, clip_id
         )
-        media = _CachedClipMedia(path, stream_type, audio_format, duration, now, loudness)
+        lifetime = CLIP_COPY_LIFETIME if _is_clip_copy(path) else CLIP_STREAMDETAILS_EXPIRATION
+        media = _CachedClipMedia(path, stream_type, audio_format, duration, now, loudness, lifetime)
         # clips are minted per queue item, so without pruning the cache grows for as long as
         # the server runs. an entry past its window can never be served again anyway
+        expired_copies: list[str] = []
         for expired_id in [
             key
             for key, entry in self._media_cache.items()
-            if now - entry.minted_at >= CLIP_STREAMDETAILS_EXPIRATION
+            if now - entry.minted_at >= entry.lifetime
         ]:
-            del self._media_cache[expired_id]
+            expired = self._media_cache.pop(expired_id)
+            if _is_clip_copy(expired.path) and expired.path != path:
+                expired_copies.append(expired.path)
+        if cached is not None and _is_clip_copy(cached.path) and cached.path != path:
+            expired_copies.append(cached.path)
         self._media_cache[clip_id] = media
+        for copy_path in expired_copies:
+            await asyncio.to_thread(Path(copy_path).unlink, missing_ok=True)
         return media
 
     def _remaining_media_lifetime(self, media: _CachedClipMedia) -> int:
         """Return the seconds the given minted media is still usable for."""
         elapsed = asyncio.get_running_loop().time() - media.minted_at
-        return max(MIN_CLIP_MEDIA_LIFETIME, round(CLIP_STREAMDETAILS_EXPIRATION - elapsed))
+        return max(MIN_CLIP_MEDIA_LIFETIME, round(media.lifetime - elapsed))
 
     def _wanted_loudness(self, queue_id: str) -> float | None:
         """Return the level in LUFS a clip should air at, or None when it should air as is."""
@@ -367,7 +386,10 @@ class AIRadioRenderMixin:
             path, stream_type, audio_format = await self._render_tts_media(
                 text, engine_uid, language, options
             )
-            # the probe is the first fetch, so a failed render surfaces here and not in playback
+            if stream_type == StreamType.HTTP:
+                # the copy is the first fetch, so a failed render surfaces here, not on air
+                path = await self._keep_local_copy(path)
+                stream_type, audio_format = StreamType.LOCAL_FILE, CLIP_COPY_FORMAT
             duration = await self._probe_duration(path)
         except Exception as err:
             self.logger.warning("AI Radio clip %s failed TTS: %s", clip_id, err)
@@ -449,20 +471,59 @@ class AIRadioRenderMixin:
             audio_format = AudioFormat(content_type=ContentType.MP3)
         return path, stream_type, audio_format
 
+    async def _keep_local_copy(self, url: str) -> str:
+        """
+        Read a clip the TTS engine hands out as a URL into a local copy and return its path.
+
+        :param url: The URL the TTS engine handed out.
+        """
+        await asyncio.to_thread(_prune_clip_copies)
+        handle, target = tempfile.mkstemp(prefix=CLIP_COPY_PREFIX, suffix=".wav")
+        os.close(handle)
+        try:
+            returncode, output = await check_output(
+                "ffmpeg",
+                "-hide_banner",
+                "-nostats",
+                "-y",
+                "-i",
+                url,
+                "-vn",
+                "-ar",
+                str(CLIP_COPY_FORMAT.sample_rate),
+                "-ac",
+                str(CLIP_COPY_FORMAT.channels),
+                "-c:a",
+                "pcm_s16le",
+                "-f",
+                "wav",
+                target,
+                timeout=CLIP_FETCH_TIMEOUT,
+            )
+            size = await asyncio.to_thread(os.path.getsize, target)
+        except (OSError, TimeoutError) as err:
+            await asyncio.to_thread(Path(target).unlink, missing_ok=True)
+            raise MusicAssistantError(f"The TTS audio could not be fetched: {err}") from err
+        report = output.decode(errors="replace").strip()
+        if size < MIN_CLIP_COPY_BYTES:
+            await asyncio.to_thread(Path(target).unlink, missing_ok=True)
+            raise _tts_fetch_error(report.splitlines()[-1] if report else "no audio")
+        if returncode != 0:
+            # some setups close the transfer with an error after the last byte; what arrived
+            # is the whole clip, and dropping it would silence the break for nothing
+            self.logger.debug(
+                "TTS audio transfer ended with an error after %d bytes, keeping what arrived",
+                size,
+            )
+        return target
+
     async def _probe_duration(self, path: str) -> int | None:
         """Return the clip duration in seconds, or None when it cannot be determined."""
         try:
             tags = await async_parse_tags(path, require_duration=True)
         except (InvalidDataError, OSError) as err:
             if any(marker in str(err) for marker in TTS_SERVER_ERROR_MARKERS):
-                # the engine reports no reason of its own (Home Assistant answers a failed
-                # render with an empty 500), so the probe's message is the only clue there is
-                raise MusicAssistantError(
-                    f"{err}. The TTS engine failed to generate the audio it handed out. "
-                    "Check the logs of the TTS engine for the reason (for a Home Assistant "
-                    "engine that is the Home Assistant core log). A cloud engine may be "
-                    "out of credit or having an outage."
-                ) from err
+                raise _tts_fetch_error(str(err)) from err
             self.logger.warning("Could not determine AI Radio clip duration: %s", err)
             return None
         return int(tags.duration) if tags.duration else None
@@ -474,3 +535,38 @@ class AIRadioRenderMixin:
             return
         session.skipped_sections += 1
         session.last_render_error = error
+
+
+def _tts_fetch_error(detail: str) -> MusicAssistantError:
+    """Return the error for TTS audio that could not be fetched, pointing at the engine's log."""
+    if not any(marker in detail for marker in TTS_SERVER_ERROR_MARKERS):
+        return MusicAssistantError(f"The TTS audio could not be fetched: {detail}")
+    # the engine reports no reason of its own (Home Assistant answers a failed render with an
+    # empty 500), so ffmpeg's message is the only clue there is
+    return MusicAssistantError(
+        f"{detail}. The TTS engine failed to generate the audio it handed out. "
+        "Check the logs of the TTS engine for the reason (for a Home Assistant "
+        "engine that is the Home Assistant core log). A cloud engine may be "
+        "out of credit or having an outage."
+    )
+
+
+def _is_clip_copy(path: str) -> bool:
+    """Return whether a clip path is a local copy this provider made and may delete."""
+    return Path(path).name.startswith(CLIP_COPY_PREFIX)
+
+
+def _prune_clip_copies() -> None:
+    """Delete local clip copies left behind by an earlier run, e.g. before a restart."""
+    cutoff = time.time() - CLIP_COPY_LIFETIME
+    try:
+        copies = list(Path(tempfile.gettempdir()).glob(f"{CLIP_COPY_PREFIX}*"))
+    except OSError:
+        return
+    for copy in copies:
+        try:
+            if copy.stat().st_mtime < cutoff:
+                copy.unlink()
+        except OSError:
+            # another pass removed it, or it is not ours to remove
+            continue
