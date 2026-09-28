@@ -393,6 +393,36 @@ async def test_save_section_leaves_the_stations_file_alone(provider: Any, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_a_saved_host_keeps_its_effects(provider: Any) -> None:
+    """Effects are stored with the host, and invalid sources are refused."""
+    template = await provider.host_template()
+    template["effects"] = {"news_jingle": "builtin", "music_bed": "/media/bed.mp3"}
+
+    saved = await provider.save_host(template)
+
+    assert saved["effects"]["news_jingle"] == "builtin"
+    assert saved["effects"]["music_bed"] == "/media/bed.mp3"
+    template["effects"] = {"music_bed": "bed.mp3"}
+    with pytest.raises(InvalidDataError):
+        await provider.save_host(template)
+
+
+@pytest.mark.asyncio
+async def test_a_client_unaware_of_effects_does_not_wipe_them(provider: Any) -> None:
+    """Saving a host without any effects key keeps the effects it already had."""
+    template = await provider.host_template()
+    template["effects"] = {"show_jingle": "builtin"}
+    await provider.save_host(template)
+    del template["effects"]
+    template["name"] = "Renamed"
+
+    saved = await provider.save_host(template)
+
+    assert saved["name"] == "Renamed"
+    assert saved["effects"]["show_jingle"] == "builtin"
+
+
+@pytest.mark.asyncio
 async def test_delete_host_forgets_its_break_memory(provider: Any, tmp_path: Path) -> None:
     """A deleted host leaves no memory behind, while other hosts keep theirs."""
     provider._memory_file = tmp_path / "break_memory.json"

@@ -122,6 +122,7 @@ ATTR_HOST_ID = "ai_radio_host_id"
 ATTR_QUEUE_DJ = "ai_radio_queue_dj"
 ATTR_GAP_NEXT_ID = "ai_radio_gap_next_id"
 ATTR_WEATHER_REQUIRED = "ai_radio_weather_required"
+ATTR_SLOT_WHEN = "ai_radio_slot_when"
 
 # placeholders resolved at render time rather than at plan time, so the aired script
 # reflects the moment it plays
@@ -163,6 +164,26 @@ BREAK_MEMORY_NEWS_INSTRUCTION = (
     "return to one of these when there is a genuinely new development, and then present it "
     "as an update:"
 )
+
+# a host can dress its breaks with sound: a jingle ahead of the news, one ahead of the intro
+# and sign-off of a show, and a music bed under everything it says. A jingle is either the
+# gong Music Assistant ships, or like a bed a file path or URL the user supplies
+EFFECT_BUILTIN_JINGLE = "builtin"
+EFFECT_SOURCE_KEYS = ("news_jingle", "show_jingle", "music_bed")
+# slots a show jingle plays in, the moments a real station would play its ident
+SHOW_JINGLE_SLOTS = frozenset({"start_of_playlist", "end_of_playlist"})
+# how far below the voice the bed sits, in dB
+DEFAULT_MUSIC_BED_LEVEL = -18
+MUSIC_BED_LEVEL_RANGE = (-40, -6)
+# the voice comes in this long before the jingle ends, so the two overlap like on air
+JINGLE_VOICE_OVERLAP_SECONDS = 0.4
+MUSIC_BED_FADE_IN_SECONDS = 1.0
+# the bed plays on this long after the last word, fading out over it
+MUSIC_BED_TAIL_SECONDS = 2.0
+# only the start of a long bed is measured, its level does not change much after that
+EFFECT_MEASURE_SECONDS = 60
+# the level a sound is brought to when neither the queue nor the voice gives a reference
+DEFAULT_EFFECT_LOUDNESS = -16.0
 
 # HA drops a tts_proxy token 60s after its last use at the lowest configurable time_memory
 CLIP_STREAMDETAILS_EXPIRATION = 60

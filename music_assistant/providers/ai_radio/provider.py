@@ -326,7 +326,11 @@ class AIRadioProvider(
     async def save_host(self, host: dict[str, Any]) -> dict[str, Any]:
         """Create or update a host."""
         async with self._station_lock:
-            normalized = self._normalize_host(deepcopy(host))
+            host = deepcopy(host)
+            # a client that does not know about effects yet must not wipe the ones set
+            if "effects" not in host and (existing := self._hosts.get(str(host.get("id") or ""))):
+                host["effects"] = existing.get("effects")
+            normalized = self._normalize_host(host)
             self._hosts[normalized["id"]] = normalized
             await self._write_hosts()
         self.logger.info("AI Radio host saved: %s (%s)", normalized["id"], normalized["name"])

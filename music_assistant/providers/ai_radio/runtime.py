@@ -42,6 +42,7 @@ from .constants import (
     ATTR_MAX_CHARS,
     ATTR_PROMPT,
     ATTR_SESSION_ID,
+    ATTR_SLOT_WHEN,
     ATTR_STATION_ID,
     ATTR_WEATHER_REQUIRED,
     ATTR_WEB_SEARCH_MODE,
@@ -884,6 +885,7 @@ class AIRadioRuntimeMixin:
                 ATTR_MAX_CHARS: section.max_chars,
                 ATTR_WEB_SEARCH_MODE: section.web_search_mode,
                 ATTR_WEATHER_REQUIRED: section.weather_required,
+                ATTR_SLOT_WHEN: section.when,
             }
         )
         return queue_item

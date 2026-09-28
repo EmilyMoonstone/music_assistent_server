@@ -32,6 +32,7 @@ from music_assistant.constants import (
     CONF_VOLUME_NORMALIZATION_TARGET,
     CONF_VOLUME_NORMALIZATION_TRACKS,
 )
+from music_assistant.helpers.dsp import ComplexFilter
 from music_assistant.helpers.tags import AudioTags
 from music_assistant.helpers.tts import TTSLanguageNotSupportedError
 from music_assistant.models.plugin import PluginProvider, TTSEngine
@@ -41,6 +42,7 @@ from music_assistant.providers.ai_radio.constants import (
     ATTR_PROMPT,
     ATTR_RENDERED_TEXT,
     ATTR_SESSION_ID,
+    ATTR_SLOT_WHEN,
     ATTR_STATION_ID,
     ATTR_WEATHER_REQUIRED,
     ATTR_WEB_SEARCH_MODE,
@@ -57,6 +59,7 @@ from music_assistant.providers.ai_radio.constants import (
     TTS_PEAK_CEILING_DB,
     TTS_SPEECHNORM_FILTER,
 )
+from music_assistant.providers.ai_radio.effects import normalize_effects
 from music_assistant.providers.ai_radio.memory import AIRadioMemoryMixin
 from music_assistant.providers.ai_radio.models import SessionState
 from music_assistant.providers.ai_radio.rendering import AIRadioRenderMixin
@@ -1279,3 +1282,154 @@ async def test_a_failed_generation_is_not_remembered() -> None:
         await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
 
     assert renderer.memory_writes == 0
+
+
+def _host_with_effects(renderer: DummyRenderer, **effects: Any) -> None:
+    """Give the renderer a host 'mika' dressing its breaks with the given sounds."""
+    renderer._hosts["mika"] = {"effects": normalize_effects(effects)}
+    cast("Any", renderer)._measure_effect_loudness = AsyncMock(return_value=-20.0)
+
+
+def _stub_sound_tags(monkeypatch: pytest.MonkeyPatch, seconds: float = 2.4) -> list[str]:
+    """Make every sound probe report the given length, and return the probed paths."""
+    probed: list[str] = []
+
+    async def fake_parse_tags(path: str, **_kwargs: Any) -> Any:
+        probed.append(path)
+        return SimpleNamespace(duration=seconds)
+
+    monkeypatch.setattr(
+        "music_assistant.providers.ai_radio.rendering.async_parse_tags", fake_parse_tags
+    )
+    return probed
+
+
+async def test_a_news_break_opens_with_the_hosts_news_jingle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The news jingle is levelled to the voice, and core learns the longer duration."""
+    probed = _stub_sound_tags(monkeypatch)
+    renderer = DummyRenderer()
+    renderer.measured_loudness = -18.0
+    _host_with_effects(renderer, news_jingle="/media/news.mp3", show_jingle="/media/ident.mp3")
+    _attach_queue(
+        renderer,
+        [_clip_item("sess_001", **{ATTR_HOST_ID: "mika", ATTR_WEB_SEARCH_MODE: "force"})],
+    )
+    _attach_normalization(renderer, target=-14, boost=3)
+
+    streamdetails = await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    effects = streamdetails.data.effects
+    assert probed == ["/media/news.mp3"]
+    assert effects.bed is None
+    # the voice airs at -14 + 3, so the jingle measured at -20 is lifted by 9 dB
+    assert effects.jingle.gain_db == pytest.approx(9.0)
+    assert streamdetails.duration == 9 + 2
+
+
+async def test_the_first_break_of_a_show_opens_with_the_ident(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A show's intro carries the show jingle, and the bed plays under it too."""
+    _stub_sound_tags(monkeypatch)
+    renderer = DummyRenderer()
+    renderer.measured_loudness = -18.0
+    _host_with_effects(
+        renderer, show_jingle="/media/ident.mp3", music_bed="/media/bed.mp3", music_bed_level=-20
+    )
+    _attach_queue(
+        renderer,
+        [_clip_item("sess_001", **{ATTR_HOST_ID: "mika", ATTR_SLOT_WHEN: "start_of_playlist"})],
+    )
+    _attach_normalization(renderer, target=-14, boost=3)
+
+    streamdetails = await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    effects = streamdetails.data.effects
+    assert effects.jingle.path == "/media/ident.mp3"
+    assert effects.bed.path == "/media/bed.mp3"
+    assert effects.bed.gain_db == pytest.approx(-11.0)
+
+
+async def test_a_sound_that_cannot_be_read_is_left_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing file costs the effect, never the break."""
+
+    async def broken_parse_tags(path: str, **_kwargs: Any) -> Any:
+        raise InvalidDataError(f"{path} not found")
+
+    monkeypatch.setattr(
+        "music_assistant.providers.ai_radio.rendering.async_parse_tags", broken_parse_tags
+    )
+    renderer = DummyRenderer()
+    renderer.measured_loudness = -18.0
+    _host_with_effects(renderer, news_jingle="/media/missing.mp3")
+    _attach_queue(
+        renderer,
+        [_clip_item("sess_001", **{ATTR_HOST_ID: "mika", ATTR_WEB_SEARCH_MODE: "force"})],
+    )
+
+    streamdetails = await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert streamdetails.data.effects is None
+    assert streamdetails.duration == 9
+
+
+async def test_effects_play_even_when_the_queue_does_not_normalize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The voice stays untouched, and the sounds are levelled against its own reading."""
+    _stub_sound_tags(monkeypatch)
+    renderer = DummyRenderer()
+    renderer.measured_loudness = -18.0
+    _host_with_effects(renderer, music_bed="/media/bed.mp3", music_bed_level=-20)
+    _attach_queue(renderer, [_clip_item("sess_001", **{ATTR_HOST_ID: "mika"})])
+    _attach_normalization(renderer, enabled=False)
+
+    streamdetails = await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert streamdetails.stream_type == StreamType.CUSTOM
+    assert streamdetails.data.gain_db is None
+    assert streamdetails.data.effects.bed.gain_db == pytest.approx(-18.0)
+
+
+async def test_the_dressed_clip_keeps_the_limiter_last(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Voice levelling comes first, the effects after it and the limiter at the very end."""
+    _stub_sound_tags(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    async def fake_ffmpeg_stream(**kwargs: Any) -> AsyncGenerator[bytes]:
+        captured.update(kwargs)
+        yield b"pcm"
+
+    monkeypatch.setattr(
+        "music_assistant.providers.ai_radio.rendering.get_ffmpeg_stream", fake_ffmpeg_stream
+    )
+    renderer = DummyRenderer()
+    renderer.measured_loudness = -18.0
+    _host_with_effects(renderer, music_bed="/media/bed.mp3")
+    _attach_queue(renderer, [_clip_item("sess_001", **{ATTR_HOST_ID: "mika"})])
+    _attach_normalization(renderer, target=-14, boost=3)
+    streamdetails = await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    [chunk async for chunk in renderer.get_audio_stream(streamdetails)]
+
+    params = captured["filter_params"]
+    assert params[:2] == [TTS_SPEECHNORM_FILTER, "volume=7.0dB"]
+    assert any(isinstance(item, ComplexFilter) for item in params)
+    assert params[-1] == f"alimiter=limit={TTS_PEAK_CEILING_DB}dB:level=false:latency=true"
+
+
+async def test_a_host_without_effects_probes_no_sounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bare breaks never pay for a sound lookup."""
+    probed = _stub_sound_tags(monkeypatch)
+    renderer = DummyRenderer()
+    renderer._hosts["mika"] = {"effects": normalize_effects(None)}
+    _attach_queue(renderer, [_clip_item("sess_001", **{ATTR_HOST_ID: "mika"})])
+
+    streamdetails = await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert probed == []
+    assert streamdetails.data is None or streamdetails.data.effects is None

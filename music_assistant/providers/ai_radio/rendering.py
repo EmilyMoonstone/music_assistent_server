@@ -26,6 +26,7 @@ from music_assistant.constants import (
     CONF_VOLUME_NORMALIZATION_TRACKS,
 )
 from music_assistant.helpers.audio import parse_loudnorm
+from music_assistant.helpers.dsp import ComplexFilter
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
 from music_assistant.helpers.process import check_output
 from music_assistant.helpers.tags import async_parse_tags
@@ -41,12 +42,17 @@ from .constants import (
     ATTR_PROMPT,
     ATTR_RENDERED_TEXT,
     ATTR_SESSION_ID,
+    ATTR_SLOT_WHEN,
     ATTR_WEATHER_REQUIRED,
     ATTR_WEB_SEARCH_MODE,
     CLIP_STREAMDETAILS_EXPIRATION,
     CONF_TTS_LOUDNESS_BOOST,
+    DEFAULT_EFFECT_LOUDNESS,
+    DEFAULT_MUSIC_BED_LEVEL,
     DEFAULT_TTS_LOUDNESS_BOOST,
     DEFERRED_PLACEHOLDERS,
+    EFFECT_MEASURE_SECONDS,
+    EFFECT_SOURCE_KEYS,
     LOUDNESS_MEASURE_TIMEOUT,
     MIN_CLIP_MEDIA_LIFETIME,
     MIN_LOUDNESS_REFERENCE_SECONDS,
@@ -58,7 +64,15 @@ from .constants import (
     TTS_SPEECHNORM_FILTER,
     WEATHER_PLACEHOLDER_TOKENS,
 )
-from .helpers import coerce_int, format_ai_radio_timestamp, soft_limit_text
+from .effects import (
+    ClipEffects,
+    EffectSound,
+    dressed_duration,
+    effect_filters,
+    jingle_source,
+    resolve_source,
+)
+from .helpers import coerce_float, coerce_int, format_ai_radio_timestamp, soft_limit_text
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -90,7 +104,10 @@ class _ClipAudio:
 
     path: str
     input_format: AudioFormat
-    gain_db: float
+    # None leaves the voice at the level the engine rendered it at
+    gain_db: float | None
+    effects: ClipEffects | None = None
+    voice_seconds: int | None = None
 
 
 class AIRadioRenderMixin:
@@ -106,6 +123,7 @@ class AIRadioRenderMixin:
     _render_locks: dict[str, asyncio.Lock]
     _media_cache: dict[str, _CachedClipMedia]
     _engine_loudness: dict[tuple[str, str, str], float]
+    _effect_assets: dict[str, tuple[float, float]]
 
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """
@@ -148,14 +166,19 @@ class AIRadioRenderMixin:
             expiration=self._remaining_media_lifetime(media),
         )
         gain_db = self._loudness_gain(queue_item.queue_id, media.loudness)
-        if gain_db is not None:
+        effects = await self._clip_effects(queue_item, media.loudness)
+        if gain_db is not None or effects is not None:
             # core never normalizes a sound effect, so the clip is levelled here or it
             # airs noticeably quieter than the music around it
             streamdetails.stream_type = StreamType.CUSTOM
             # core mirrors what ffmpeg reports onto this object, so it gets a copy of the
             # constant rather than a handle on the one every clip shares
             streamdetails.decoded_audio_format = replace(TTS_CLIP_PCM_FORMAT)
-            streamdetails.data = _ClipAudio(media.path, media.audio_format, gain_db)
+            streamdetails.data = _ClipAudio(
+                media.path, media.audio_format, gain_db, effects, media.duration
+            )
+            if effects is not None:
+                streamdetails.duration = dressed_duration(effects, media.duration)
         return streamdetails
 
     async def get_audio_stream(
@@ -168,15 +191,17 @@ class AIRadioRenderMixin:
         :param seek_position: Ignored, a spoken clip cannot be seeked.
         """
         clip = cast("_ClipAudio", streamdetails.data)
+        filter_params: list[str | ComplexFilter] = []
+        if clip.gain_db is not None:
+            filter_params += [TTS_SPEECHNORM_FILTER, f"volume={round(clip.gain_db, 2)}dB"]
+        if clip.effects is not None:
+            filter_params += effect_filters(clip.effects, clip.voice_seconds)
+        filter_params.append(f"alimiter=limit={TTS_PEAK_CEILING_DB}dB:level=false:latency=true")
         async for chunk in get_ffmpeg_stream(
             audio_input=clip.path,
             input_format=clip.input_format,
             output_format=TTS_CLIP_PCM_FORMAT,
-            filter_params=[
-                TTS_SPEECHNORM_FILTER,
-                f"volume={round(clip.gain_db, 2)}dB",
-                f"alimiter=limit={TTS_PEAK_CEILING_DB}dB:level=false:latency=true",
-            ],
+            filter_params=filter_params,
         ):
             yield chunk
 
@@ -324,8 +349,7 @@ class AIRadioRenderMixin:
         language = str(host.get("language") or "")
         max_chars = int(attributes.get(ATTR_MAX_CHARS) or 0)
         web_mode = str(attributes.get(ATTR_WEB_SEARCH_MODE) or "disabled")
-        # a section that has to search the web is the news, as is one asking what it reported
-        news = web_mode == "force" or RECENT_NEWS_PLACEHOLDER in prompt
+        news = _is_news_clip(queue_item)
         resolved = self._apply_break_memory(resolved, host_id, news=news)
         try:
             text = cast(
@@ -382,9 +406,11 @@ class AIRadioRenderMixin:
             raise MediaNotFoundError(f"AI Radio clip {clip_id} failed TTS") from err
         # measuring costs a fetch and a decode on the just-in-time render path, so it only
         # runs where the reading has somewhere to go
+        # sounds added to the break are levelled against the voice, so a host with effects
+        # needs the reading even when the queue does not normalize
         loudness = (
             await self._reference_loudness(engine_uid, language, options, path, duration)
-            if self._wanted_loudness(queue_item.queue_id) is not None
+            if self._wanted_loudness(queue_item.queue_id) is not None or _has_effects(host)
             else None
         )
         return path, stream_type, audio_format, duration, loudness
@@ -474,6 +500,87 @@ class AIRadioRenderMixin:
             return None
         return int(tags.duration) if tags.duration else None
 
+    async def _clip_effects(
+        self, queue_item: QueueItem, voice_loudness: float | None
+    ) -> ClipEffects | None:
+        """Return the sounds the host dresses this break with, or None when it airs bare."""
+        attributes = queue_item.extra_attributes
+        host = self._hosts.get(str(attributes.get(ATTR_HOST_ID) or "")) or {}
+        if not _has_effects(host):
+            return None
+        effects = host["effects"]
+        jingle_path = jingle_source(
+            effects, _is_news_clip(queue_item), str(attributes.get(ATTR_SLOT_WHEN) or "")
+        )
+        bed_path = resolve_source(str(effects.get("music_bed") or ""))
+        if not jingle_path and not bed_path:
+            return None
+        # the sounds sit relative to the voice, so they follow whatever level it airs at
+        reference = self._wanted_loudness(queue_item.queue_id)
+        if reference is None:
+            reference = voice_loudness if voice_loudness is not None else DEFAULT_EFFECT_LOUDNESS
+        bed_level = coerce_float(effects.get("music_bed_level"), DEFAULT_MUSIC_BED_LEVEL)
+        jingle = await self._effect_sound(jingle_path, reference) if jingle_path else None
+        bed = await self._effect_sound(bed_path, reference + bed_level) if bed_path else None
+        if jingle is None and bed is None:
+            return None
+        return ClipEffects(jingle=jingle, bed=bed)
+
+    async def _effect_sound(self, path: str, target: float) -> EffectSound | None:
+        """
+        Return a jingle or bed levelled to the given loudness, or None when it cannot be used.
+
+        A sound that is missing or unreadable is left out, the break still airs without it.
+
+        :param path: The file path or URL of the sound.
+        :param target: The loudness in LUFS the sound should play at.
+        """
+        if not hasattr(self, "_effect_assets"):
+            self._effect_assets = {}
+        if (cached := self._effect_assets.get(path)) is None:
+            try:
+                async with asyncio.timeout(LOUDNESS_MEASURE_TIMEOUT):
+                    tags = await async_parse_tags(path, require_duration=True)
+            except (InvalidDataError, OSError, TimeoutError) as err:
+                self.logger.warning(
+                    "AI Radio sound %s cannot be played, leaving it out: %s", path, err
+                )
+                return None
+            loudness = await self._measure_effect_loudness(path)
+            if not tags.duration or loudness is None:
+                self.logger.warning("AI Radio sound %s could not be measured, leaving it out", path)
+                return None
+            cached = (float(tags.duration), loudness)
+            self._effect_assets[path] = cached
+        seconds, loudness = cached
+        return EffectSound(path=path, seconds=seconds, gain_db=target - loudness)
+
+    async def _measure_effect_loudness(self, path: str) -> float | None:
+        """Return the integrated loudness of a jingle or bed in LUFS, or None when it fails."""
+        try:
+            returncode, output = await check_output(
+                "ffmpeg",
+                "-hide_banner",
+                "-nostats",
+                "-i",
+                path,
+                "-t",
+                str(EFFECT_MEASURE_SECONDS),
+                "-af",
+                "loudnorm=print_format=json",
+                "-f",
+                "null",
+                "-",
+                timeout=LOUDNESS_MEASURE_TIMEOUT,
+            )
+        except (OSError, TimeoutError) as err:
+            self.logger.debug("Could not measure AI Radio sound %s: %s", path, err)
+            return None
+        if returncode != 0:
+            self.logger.debug("Could not measure AI Radio sound %s: ffmpeg failed", path)
+            return None
+        return parse_loudnorm(output)
+
     def _record_skip(self, queue_item: QueueItem, error: str) -> None:
         """Record a skipped clip on its owning session."""
         session_id = str(queue_item.extra_attributes.get(ATTR_SESSION_ID) or "")
@@ -481,3 +588,18 @@ class AIRadioRenderMixin:
             return
         session.skipped_sections += 1
         session.last_render_error = error
+
+
+def _is_news_clip(queue_item: QueueItem) -> bool:
+    """Return whether a clip reports news."""
+    attributes = queue_item.extra_attributes
+    # a section that has to search the web is the news, as is one asking what it reported
+    return str(attributes.get(ATTR_WEB_SEARCH_MODE) or "") == "force" or (
+        RECENT_NEWS_PLACEHOLDER in str(attributes.get(ATTR_PROMPT) or "")
+    )
+
+
+def _has_effects(host: dict[str, Any]) -> bool:
+    """Return whether a host dresses its breaks with any sound."""
+    effects = host.get("effects") or {}
+    return any(effects.get(key) for key in EFFECT_SOURCE_KEYS)

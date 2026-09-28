@@ -15,6 +15,7 @@ from music_assistant_models.errors import InvalidDataError
 from music_assistant.helpers.json import async_json_loads, json_dumps
 
 from .constants import DEFAULT_LLM_INSTRUCTIONS, MERGE_SECTION_PROMPT
+from .effects import default_effects, normalize_effects
 from .helpers import slugify
 
 if TYPE_CHECKING:
@@ -382,6 +383,7 @@ class AIRadioHostsMixin:
             "section_ids": section_ids,
             "section_order": deepcopy(raw_section_order),
             "merge_section_id": merge_section_id,
+            "effects": normalize_effects(host.get("effects")),
         }
 
     def _default_host_template(self) -> dict[str, Any]:
@@ -435,6 +437,7 @@ class AIRadioHostsMixin:
                 {"when": "end_of_playlist", "flow": [{"MUST": "Song_Introduction_End"}]},
             ],
             "merge_section_id": "Between_Songs_Smoother",
+            "effects": default_effects(),
         }
 
     def _default_preset_hosts(self) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
@@ -568,6 +571,7 @@ def _compile_preset_host(preset: _PresetHost) -> tuple[dict[str, Any], list[dict
         "section_ids": [section["id"] for section in sections],
         "section_order": section_order,
         "merge_section_id": merge_section_id,
+        "effects": default_effects(),
     }
     return host, sections
 
