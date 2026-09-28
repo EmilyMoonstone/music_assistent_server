@@ -10,6 +10,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import web
 from music_assistant_models.auth import Scope
 from music_assistant_models.enums import EventType, PlaybackState, ProviderFeature
 from music_assistant_models.errors import (
@@ -484,6 +485,77 @@ async def test_browsing_never_leaves_the_media_folder(provider: Any, media: Path
         await provider.browse_jingles(str(media / ".."))
     with pytest.raises(InvalidDataError):
         await provider.browse_jingles(str(media / "missing"))
+
+
+def _preview_mass(provider: Any) -> AsyncMock:
+    """Give the provider a stream server address and record the announcements it plays."""
+    announce = AsyncMock()
+    provider.mass = SimpleNamespace(
+        streams=SimpleNamespace(base_url="http://ma.local:8097"),
+        players=SimpleNamespace(play_announcement=announce),
+    )
+    provider._jingle_previews = {}
+    return announce
+
+
+def _preview_request(url: str) -> Any:
+    """Build the request the announcement renderer sends for a preview link."""
+    return SimpleNamespace(path=url.removeprefix("http://ma.local:8097"))
+
+
+@pytest.mark.asyncio
+async def test_a_jingle_is_previewed_through_a_short_lived_link(provider: Any, media: Path) -> None:
+    """The announcement gets a stream server link that serves exactly that file."""
+    announce = _preview_mass(provider)
+    jingle = media / "ai_radio" / "jingles" / "Neues aus dem Untergrund.mp3"
+
+    await provider.preview_jingle(str(jingle), "kitchen")
+
+    player_id, url = announce.call_args.args
+    assert player_id == "kitchen"
+    assert announce.call_args.kwargs == {"pre_announce": False}
+    assert url.startswith("http://ma.local:8097/ai_radio/jingle_preview/")
+    assert url.endswith(".mp3")
+    response = await provider._serve_jingle_preview(_preview_request(url))
+    assert Path(response._path) == jingle.resolve()
+
+
+@pytest.mark.asyncio
+async def test_an_expired_or_unknown_preview_link_serves_nothing(
+    provider: Any, media: Path
+) -> None:
+    """A link stops working once its time is up, and a made-up one never works."""
+    announce = _preview_mass(provider)
+    await provider.preview_jingle(str(media / "ai_radio" / "jingles" / "a calm one.M4A"), "p1")
+    url = announce.call_args.args[1]
+    token = Path(url).stem
+    provider._jingle_previews[token] = (provider._jingle_previews[token][0], 0.0)
+
+    with pytest.raises(web.HTTPNotFound):
+        await provider._serve_jingle_preview(_preview_request(url))
+    with pytest.raises(web.HTTPNotFound):
+        await provider._serve_jingle_preview(
+            _preview_request("http://ma.local:8097/ai_radio/jingle_preview/guess.mp3")
+        )
+
+
+@pytest.mark.asyncio
+async def test_only_media_files_the_gong_and_urls_can_be_previewed(
+    provider: Any, media: Path
+) -> None:
+    """Files outside the media folder or missing ones are refused, URLs play as they are."""
+    announce = _preview_mass(provider)
+
+    with pytest.raises(InvalidDataError):
+        await provider.preview_jingle(str(media.parent / "secret.mp3"), "p1")
+    with pytest.raises(InvalidDataError):
+        await provider.preview_jingle(str(media / "missing.mp3"), "p1")
+    assert announce.await_count == 0
+
+    await provider.preview_jingle("https://example.test/jingle.mp3", "p1")
+    assert announce.call_args.args == ("p1", "https://example.test/jingle.mp3")
+    await provider.preview_jingle("builtin", "p1")
+    assert announce.call_args.args[1].startswith("http://ma.local:8097/ai_radio/jingle_preview/")
 
 
 @pytest.mark.asyncio
@@ -1114,6 +1186,7 @@ async def test_stations_are_played_by_everyone_and_edited_by_admins() -> None:
         # probes a path on the server, so it is reserved for those who configure the plugin
         "ai_radio/jingles/inspect",
         "ai_radio/jingles/browse",
+        "ai_radio/jingles/preview",
     ):
         assert scopes[command] == Scope.CONFIG_PROVIDERS_WRITE
 

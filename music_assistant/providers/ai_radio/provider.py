@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from aiohttp import web
 from music_assistant_models.auth import Scope
 from music_assistant_models.enums import EventType
 from music_assistant_models.errors import (
@@ -34,6 +36,8 @@ from .constants import (
     ENGINE_RETRY_DELAY,
     JINGLE_FILE_EXTENSIONS,
     JINGLE_MEDIA_ROOT,
+    JINGLE_PREVIEW_ROUTE,
+    JINGLE_PREVIEW_SECONDS,
     LOUDNESS_MEASURE_TIMEOUT,
     MAX_FINISHED_SESSIONS,
     SUPPORTED_FEATURES,
@@ -78,6 +82,8 @@ class AIRadioProvider(
 
     # where jingles are browsed from, a class attribute so tests can point it elsewhere
     _jingle_media_root: str = JINGLE_MEDIA_ROOT
+    # preview link token -> (jingle file, monotonic time the link expires)
+    _jingle_previews: dict[str, tuple[Path, float]] = {}  # noqa: RUF012
 
     def __init__(
         self,
@@ -156,6 +162,7 @@ class AIRadioProvider(
             ("ai_radio/memory/clear", self.clear_break_memory),
             ("ai_radio/jingles/inspect", self.inspect_jingle),
             ("ai_radio/jingles/browse", self.browse_jingles),
+            ("ai_radio/jingles/preview", self.preview_jingle),
             ("ai_radio/start", self.start_run),
             ("ai_radio/stop", self.stop_run),
             ("ai_radio/status", self.get_status),
@@ -189,6 +196,11 @@ class AIRadioProvider(
             self._unregister_handles.append(
                 self.mass.register_api_command(command, handler, required_scope=required_scope)
             )
+        self._unregister_handles.append(
+            self.mass.streams.register_dynamic_route(
+                f"{JINGLE_PREVIEW_ROUTE}/*", self._serve_jingle_preview, "GET"
+            )
+        )
         self._unregister_handles.append(
             self.mass.subscribe(self._on_providers_updated, EventType.PROVIDERS_UPDATED)
         )
@@ -401,14 +413,8 @@ class AIRadioProvider(
 
         :param path: The folder to list, the media folder itself when omitted.
         """
-        root = Path(self._jingle_media_root)
-        target = Path(path or root)
-        # resolved so a ".." or a symlink cannot lead the listing out of the media folder
-        resolved_root, resolved = await asyncio.gather(
-            asyncio.to_thread(root.resolve), asyncio.to_thread(target.resolve)
-        )
-        if not resolved.is_relative_to(resolved_root):
-            raise InvalidDataError(f"Jingles can only be picked from {root}")
+        target = Path(path or self._jingle_media_root)
+        resolved_root, resolved = await self._resolve_in_media(target)
         try:
             folders, files = await asyncio.to_thread(_list_sound_folder, resolved)
         except (FileNotFoundError, NotADirectoryError) as err:
@@ -419,6 +425,27 @@ class AIRadioProvider(
             "folders": [{"name": item.name, "path": str(item)} for item in folders],
             "files": [{"name": item.name, "path": str(item)} for item in files],
         }
+
+    async def preview_jingle(self, source: str, player_id: str) -> None:
+        """
+        Play a jingle on a player as an announcement, to hear it before tagging it.
+
+        :param source: The built-in gong, a file in the media folder or a URL.
+        :param player_id: The player to play it on.
+        """
+        check_player_access(player_id)
+        source = source.strip()
+        if source.startswith(("http://", "https://")):
+            url = source
+        else:
+            if source == EFFECT_BUILTIN_JINGLE:
+                path = Path(resolve_source(source))
+            else:
+                _root, path = await self._resolve_in_media(Path(source))
+            if not await asyncio.to_thread(path.is_file):
+                raise InvalidDataError(f"Jingle not found: {source}")
+            url = self._jingle_preview_url(path)
+        await self.mass.players.play_announcement(player_id, url, pre_announce=False)
 
     async def host_template(self) -> dict[str, Any]:
         """Return a default host template."""
@@ -631,6 +658,36 @@ class AIRadioProvider(
                 allow_retry=True,
                 task_id=f"load_provider_{self.instance_id}",
             )
+
+    async def _resolve_in_media(self, target: Path) -> tuple[Path, Path]:
+        """Return the resolved media folder and target, refusing a target outside of it."""
+        root = Path(self._jingle_media_root)
+        # resolved so a ".." or a symlink cannot lead out of the media folder
+        resolved_root, resolved = await asyncio.gather(
+            asyncio.to_thread(root.resolve), asyncio.to_thread(target.resolve)
+        )
+        if not resolved.is_relative_to(resolved_root):
+            raise InvalidDataError(f"Jingles can only be picked from {root}")
+        return resolved_root, resolved
+
+    def _jingle_preview_url(self, path: Path) -> str:
+        """Return a short-lived stream server link that serves one jingle file."""
+        now = time.monotonic()
+        # links are only asked for while someone edits a host, so pruning here is enough
+        self._jingle_previews = {
+            token: entry for token, entry in self._jingle_previews.items() if entry[1] > now
+        }
+        token = uuid4().hex
+        self._jingle_previews[token] = (path, now + JINGLE_PREVIEW_SECONDS)
+        return f"{self.mass.streams.base_url}{JINGLE_PREVIEW_ROUTE}/{token}{path.suffix}"
+
+    async def _serve_jingle_preview(self, request: web.Request) -> web.StreamResponse:
+        """Serve the jingle a preview link was made for, while the link is still valid."""
+        token = Path(request.path).stem
+        entry = self._jingle_previews.get(token)
+        if entry is None or entry[1] <= time.monotonic():
+            raise web.HTTPNotFound(reason="Unknown or expired jingle preview")
+        return web.FileResponse(entry[0])
 
     def _prune_finished_sessions(self) -> None:
         """Drop the oldest finished sessions beyond the retention limit."""
