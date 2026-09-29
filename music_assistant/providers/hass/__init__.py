@@ -73,8 +73,11 @@ from .helpers import (
     ControlCapabilities,
     get_control_name,
     is_entity_id,
+    is_safe_attachment_path,
     media_source_id,
     pick_stt_language,
+    remove_staged_attachments,
+    stage_attachment,
 )
 
 if TYPE_CHECKING:
@@ -695,15 +698,22 @@ class HomeAssistantProvider(PluginProvider):
             "instructions": query,
             "entity_id": entity_id,
         }
-        if attachments:
-            service_data["attachments"] = [_ai_task_attachment(item) for item in attachments]
-        result = await self.hass.send_command(
-            "call_service",
-            domain="ai_task",
-            service="generate_data",
-            service_data=service_data,
-            return_response=True,
-        )
+        staged: list[str] = []
+        try:
+            if attachments:
+                service_data["attachments"] = [
+                    await _ai_task_attachment(item, staged) for item in attachments
+                ]
+            result = await self.hass.send_command(
+                "call_service",
+                domain="ai_task",
+                service="generate_data",
+                service_data=service_data,
+                return_response=True,
+            )
+        finally:
+            if staged:
+                await asyncio.to_thread(remove_staged_attachments, staged)
         response = result.get("response", {}) if isinstance(result, dict) else {}
         data = response.get("data") if isinstance(response, dict) else None
         if not data:
@@ -1309,19 +1319,30 @@ def _decompress_state(entity_id: str, compressed_state: CompressedState) -> Stat
     }
 
 
-def _ai_task_attachment(attachment: AIAttachment) -> dict[str, str]:
+async def _ai_task_attachment(attachment: AIAttachment, staged: list[str]) -> dict[str, str]:
     """
     Return an attachment as Home Assistant's ai_task takes it: a media source item.
 
     Home Assistant reads the file itself, so it has to be one it can reach, a file in the
-    media folder it shares with Music Assistant.
+    media folder it shares with Music Assistant. A file whose name its AI integrations
+    cannot pass on is handed over as a copy, recorded in staged for removal afterwards.
     """
-    if (content_id := media_source_id(attachment.path)) is None:
+    path = attachment.path
+    if media_source_id(path) is None:
         msg = (
-            f"Home Assistant cannot read {attachment.path}: only files in the shared media "
+            f"Home Assistant cannot read {path}: only files in the shared media "
             "folder can be handed to an AI Task"
         )
         raise UnsupportedFeaturedException(msg)
+    if not is_safe_attachment_path(path):
+        try:
+            path = await asyncio.to_thread(stage_attachment, path)
+        except OSError as err:
+            msg = f"Could not copy {attachment.path} to a name Home Assistant can pass on: {err}"
+            raise MusicAssistantError(msg) from err
+        staged.append(path)
+    content_id = media_source_id(path)
+    assert content_id is not None  # a copy is made inside the media folder
     mime_type = attachment.mime_type or mimetypes.guess_type(attachment.path)[0]
     return {
         "media_content_id": content_id,

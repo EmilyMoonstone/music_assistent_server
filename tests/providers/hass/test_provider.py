@@ -657,7 +657,7 @@ async def test_ai_query_hands_files_from_the_media_folder_to_the_ai_task() -> No
         await provider.ai_query(
             "What style is this jingle?",
             attachments=[
-                AIAttachment(path="/media/ai_radio/jingles/Mika Nacht.mp3"),
+                AIAttachment(path="/media/ai_radio/jingles/mika_nacht.mp3"),
                 AIAttachment(path="/media/ai_radio/bed.ogg", mime_type="audio/ogg"),
             ],
         )
@@ -665,7 +665,7 @@ async def test_ai_query_hands_files_from_the_media_folder_to_the_ai_task() -> No
         service_data = hass.send_command.call_args.kwargs["service_data"]
         assert service_data["attachments"] == [
             {
-                "media_content_id": "media-source://media_source/local/ai_radio/jingles/Mika Nacht.mp3",
+                "media_content_id": "media-source://media_source/local/ai_radio/jingles/mika_nacht.mp3",
                 "media_content_type": "audio/mpeg",
             },
             {
@@ -673,6 +673,53 @@ async def test_ai_query_hands_files_from_the_media_folder_to_the_ai_task() -> No
                 "media_content_type": "audio/ogg",
             },
         ]
+
+
+async def test_ai_query_hands_a_file_with_a_special_name_over_as_a_copy() -> None:
+    """Umlauts and spaces never reach the AI integration, and the copy is removed after."""
+    staged = "/media/.music_assistant_ai/attachment_1.mp3"
+    removed: list[list[str]] = []
+    with (
+        patch("music_assistant.providers.hass.stage_attachment", return_value=staged) as stage,
+        patch(
+            "music_assistant.providers.hass.remove_staged_attachments",
+            side_effect=lambda paths: removed.append(list(paths)),
+        ),
+    ):
+        async with _start_provider([_state("ai_task.first", "First")]) as (provider, hass):
+            await provider.ai_query(
+                "Listen", attachments=[AIAttachment(path="/media/Für die Szene.mp3")]
+            )
+
+            service_data = hass.send_command.call_args.kwargs["service_data"]
+
+    stage.assert_called_once_with("/media/Für die Szene.mp3")
+    assert service_data["attachments"] == [
+        {
+            "media_content_id": "media-source://media_source/local/.music_assistant_ai/attachment_1.mp3",
+            "media_content_type": "audio/mpeg",
+        }
+    ]
+    assert removed == [[staged]]
+
+
+async def test_ai_query_removes_the_copy_when_the_query_fails() -> None:
+    """A failing AI Task still leaves no copy behind."""
+    staged = "/media/.music_assistant_ai/attachment_2.mp3"
+    removed: list[list[str]] = []
+    with (
+        patch("music_assistant.providers.hass.stage_attachment", return_value=staged),
+        patch(
+            "music_assistant.providers.hass.remove_staged_attachments",
+            side_effect=lambda paths: removed.append(list(paths)),
+        ),
+    ):
+        async with _start_provider([_state("ai_task.first", "First")]) as (provider, hass):
+            hass.send_command.side_effect = BaseHassClientError("quota")
+            with pytest.raises(BaseHassClientError):
+                await provider.ai_query("Listen", attachments=[AIAttachment(path="/media/ü.mp3")])
+
+    assert removed == [[staged]]
 
 
 async def test_ai_query_without_attachments_sends_none() -> None:
