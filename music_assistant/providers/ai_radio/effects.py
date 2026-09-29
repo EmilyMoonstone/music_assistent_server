@@ -406,8 +406,9 @@ def strip_jingle_words(text: str, jingles: list[dict[str, Any]]) -> str:
 
 
 _PHRASE_BREAK = re.compile(r"[.!?;:,\n]+")
-# what may sit between the words of an echoed phrase: spaces, commas, dashes (en, em)
-_WORD_GAP = "[\\s,;:\\-–—]+"  # noqa: RUF001
+# what may sit between the words of an echoed phrase: spaces, punctuation (also the end
+# of a sentence, as in "München leuchtet. Mika hier."), dashes (en, em)
+_WORD_GAP = "[\\s,;:.!?…\\-–—]+"  # noqa: RUF001
 # what is trimmed off a jingle's words: punctuation, quotes of all kinds, dashes
 _PUNCTUATION = ".,;:!?…\"'„“”‚‘’«»()-–—"  # noqa: RUF001
 
