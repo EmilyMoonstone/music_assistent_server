@@ -245,9 +245,11 @@ JINGLE_AFTER_ALWAYS_INSTRUCTION = (
 )
 JINGLE_AFTER_ONSET_HINT = " The next song's vocals start after {seconds:.0f}s."
 JINGLE_CHOICE_CLOSING = (
-    "Pick by time of day, the music around and the words. You may pick up on a jingle's "
-    "words, do not repeat them. Then the script."
+    "Pick by time of day, the music around and the words. The listeners hear the jingles "
+    "themselves, so never say, quote or paraphrase their words. Then the script."
 )
+# a jingle phrase this short is too common to take out of a script, like "erste Platte"
+MIN_ECHOED_PHRASE_WORDS = 3
 # how far below the voice the bed sits, in dB
 DEFAULT_MUSIC_BED_LEVEL = -18
 MUSIC_BED_LEVEL_RANGE = (-40, -6)

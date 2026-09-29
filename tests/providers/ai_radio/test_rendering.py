@@ -1689,3 +1689,26 @@ async def test_the_closing_jingle_is_mixed_in_after_the_voice(
     assert item.extra_attributes[ATTR_JINGLE_AFTER] == "/media/closer.mp3"
     assert effects.after.path == "/media/closer.mp3"
     assert streamdetails.duration == 9 + 3
+
+
+async def test_the_host_does_not_read_out_the_jingles_words() -> None:
+    """The LLM is told not to repeat a jingle, and an echo it writes anyway is cut."""
+    renderer = DummyRenderer()
+    renderer._hosts["mika"] = {
+        "effects": normalize_effects(
+            {
+                "jingles": [
+                    {"source": "/media/a.mp3", "tags": [], "text": "Kopf aus, Lautsprecher an"}
+                ],
+                "jingle_chance": 100,
+            }
+        )
+    }
+    renderer.llm_reply = "JINGLE: 1\nKopf aus, Lautsprecher an! Guten Abend."
+    item = _clip_item("sess_001", **TRANSITION)
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert "never say, quote or paraphrase" in renderer.llm_prompts[0]
+    assert renderer.tts_texts == ["Guten Abend."]
