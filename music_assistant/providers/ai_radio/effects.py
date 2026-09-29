@@ -36,6 +36,7 @@ from .constants import (
     JINGLE_VOICE_OVERLAP_SECONDS,
     MAX_JINGLE_TEXT_CHARS,
     MAX_JINGLES,
+    MIN_ECHOED_PHRASE_WORDS,
     MUSIC_BED_FADE_IN_SECONDS,
     MUSIC_BED_LEVEL_RANGE,
     MUSIC_BED_TAIL_SECONDS,
@@ -341,6 +342,44 @@ def take_jingle_choices(
     # the lines never reach the listener, whether they named a valid jingle or not
     script = _AFTER_CHOICE_LINE.sub("", _JINGLE_CHOICE_LINE.sub("", text)).strip()
     return choice, script
+
+
+def strip_jingle_words(text: str, jingles: list[dict[str, Any]]) -> str:
+    """
+    Return a script without the phrases its jingles already say.
+
+    The LLM is told not to repeat them, but a line it echoes anyway would air twice: once
+    sung by the jingle, once read by the host. Phrases too short to be the jingle's own
+    (see MIN_ECHOED_PHRASE_WORDS) are left alone.
+
+    :param text: The script.
+    :param jingles: The jingles airing around it.
+    """
+    cut = text
+    for jingle in jingles:
+        words_said = str(jingle.get("text") or "")
+        # the whole line, and each of its parts on its own
+        for phrase in [words_said, *_PHRASE_BREAK.split(words_said)]:
+            words = [word for word in (w.strip(_PUNCTUATION) for w in phrase.split()) if word]
+            if len(words) < MIN_ECHOED_PHRASE_WORDS:
+                continue
+            pattern = r"\b" + _WORD_GAP.join(re.escape(word) for word in words)
+            cut = re.sub(pattern + r"\b[.!?,;:…]*", " ", cut, flags=re.IGNORECASE)
+    if cut == text:
+        return text
+    text = cut
+    # tidy what the cuts leave behind: doubled spaces, stray and doubled punctuation
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s+([.!?,;:])", r"\1", text)
+    text = re.sub(r"([.!?])[.!?,;:\s]*[.!?,;:]", r"\1", text)
+    return text.strip(" ,;:")
+
+
+_PHRASE_BREAK = re.compile(r"[.!?;:,\n]+")
+# what may sit between the words of an echoed phrase: spaces, commas, dashes (en, em)
+_WORD_GAP = "[\\s,;:\\-–—]+"  # noqa: RUF001
+# what is trimmed off a jingle's words: punctuation, quotes of all kinds, dashes
+_PUNCTUATION = ".,;:!?…\"'„“”‚‘’«»()-–—"  # noqa: RUF001
 
 
 def _numbers_of(pool: list[dict[str, Any]], numbered: list[dict[str, Any]]) -> str:

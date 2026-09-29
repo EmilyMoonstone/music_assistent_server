@@ -35,6 +35,7 @@ from music_assistant.providers.ai_radio.effects import (
     normalize_effects,
     pick_jingle,
     resolve_source,
+    strip_jingle_words,
     take_jingle_choices,
     time_of_day_tag,
     wants_after_jingle,
@@ -530,3 +531,35 @@ def test_opening_and_closing_jingles_build_one_filtergraph() -> None:
     assert args.count("-i") == 4
     order = ["duration=first", "adelay", "duration=longest", "acrossfade"]
     assert [graph.index(step) for step in order] == sorted(graph.index(step) for step in order)
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        (
+            "Kurz und knapp: Was draussen passiert. In Berlin regnet es.",
+            "In Berlin regnet es.",
+        ),
+        ("Kopf aus, Lautsprecher an! Hier ist Mika.", "Hier ist Mika."),
+        ("Hier ist Mika, kopf aus lautsprecher an, und los.", "Hier ist Mika, und los."),
+        # two words are too common to be the jingle's own
+        ("Das ist die erste Platte heute.", "Das ist die erste Platte heute."),
+    ],
+)
+def test_a_script_does_not_repeat_its_jingles(script: str, expected: str) -> None:
+    """Phrases the jingles sing are taken out of what the host reads."""
+    jingles = [
+        {"text": "Kurz und knapp. Was draussen passiert."},
+        {"text": "Kopf aus, Lautsprecher an"},
+        {"text": "Erste Platte."},
+    ]
+
+    assert strip_jingle_words(script, jingles) == expected
+
+
+def test_a_script_without_echoes_is_left_as_it_is() -> None:
+    """Line breaks and spacing survive when nothing had to be cut."""
+    script = "Guten Abend.\n\nGleich kommt Musik."
+
+    assert strip_jingle_words(script, [{"text": "Kopf aus, Lautsprecher an"}]) == script
+    assert strip_jingle_words(script, []) == script
