@@ -830,6 +830,98 @@ async def test_tts_bare_500_without_language_raises_generic_error() -> None:
         assert "500" in str(excinfo.value)
 
 
+def _mock_stt(
+    provider: HomeAssistantProvider,
+    languages: list[str],
+    result: dict[str, Any] | None = None,
+) -> tuple[MagicMock, MagicMock]:
+    """Let the Home Assistant STT endpoint list the languages and answer, return get/post."""
+    listing = AsyncMock()
+    listing.ok = True
+    listing.json.return_value = {"languages": languages}
+    get = cast("MagicMock", provider.mass.http_session.get)
+    get.return_value.__aenter__.return_value = listing
+    answer = AsyncMock()
+    answer.ok = True
+    answer.json.return_value = result or {"text": " Hallo Welt ", "result": "success"}
+    post = cast("MagicMock", provider.mass.http_session.post)
+    post.return_value.__aenter__.return_value = answer
+    return get, post
+
+
+async def test_stt_entities_are_listed_as_engines() -> None:
+    """Expose every Home Assistant STT entity as a speech-to-text engine."""
+    states = [_state("stt.whisper", "Whisper"), _state("stt.cloud", "Cloud")]
+
+    async with _start_provider(states) as (provider, _):
+        engines = await provider.get_stt_engines()
+
+        assert [(engine.id, engine.name) for engine in engines] == [
+            ("stt.cloud", "Cloud (stt.cloud)"),
+            ("stt.whisper", "Whisper (stt.whisper)"),
+        ]
+
+
+async def test_stt_sends_the_audio_in_a_language_the_engine_knows() -> None:
+    """Transcribe on the first engine, in the region of the language it lists."""
+    states = [_state("stt.first", "First"), _state("stt.second", "Second")]
+
+    async with _start_provider(states) as (provider, _):
+        get, post = _mock_stt(provider, ["en-US", "de-DE", "de-AT"])
+
+        text = await provider.speech_to_text(b"pcm", language="de")
+
+        assert text == "Hallo Welt"
+        assert get.call_args.args == ("http://homeassistant.local:8123/api/stt/stt.first",)
+        request = post.call_args
+        assert request.args == ("http://homeassistant.local:8123/api/stt/stt.first",)
+        assert request.kwargs["data"] == b"pcm"
+        assert request.kwargs["headers"]["X-Speech-Content"] == (
+            "format=wav; codec=pcm; sample_rate=16000; bit_rate=16; channel=1; language=de-DE"
+        )
+
+
+async def test_stt_uses_the_requested_engine() -> None:
+    """Transcribe on the requested engine."""
+    states = [_state("stt.first", "First"), _state("stt.second", "Second")]
+
+    async with _start_provider(states) as (provider, _):
+        _, post = _mock_stt(provider, ["de-DE"])
+
+        await provider.speech_to_text(b"pcm", engine_id="stt.second")
+
+        assert post.call_args.args == ("http://homeassistant.local:8123/api/stt/stt.second",)
+
+
+async def test_stt_rejects_a_language_the_engine_does_not_know() -> None:
+    """A language the engine does not list fails before any audio is sent."""
+    async with _start_provider([_state("stt.first", "First")]) as (provider, _):
+        _, post = _mock_stt(provider, ["en-US"])
+
+        with pytest.raises(MusicAssistantError, match="does not support the language 'de-DE'"):
+            await provider.speech_to_text(b"pcm", language="de-DE")
+
+        post.assert_not_called()
+
+
+async def test_stt_failed_result_raises() -> None:
+    """An engine that reports an error result fails the transcription."""
+    async with _start_provider([_state("stt.first", "First")]) as (provider, _):
+        _mock_stt(provider, ["de-DE"], result={"text": None, "result": "error"})
+
+        with pytest.raises(MusicAssistantError, match="could not transcribe"):
+            await provider.speech_to_text(b"pcm", language="de-DE")
+
+
+async def test_stt_without_entity_is_unsupported() -> None:
+    """Without an STT entity there is no engine and no transcription."""
+    async with _start_provider([_state("tts.only", "Only")]) as (provider, _):
+        assert await provider.get_stt_engines() == []
+
+        with pytest.raises(UnsupportedFeaturedException):
+            await provider.speech_to_text(b"pcm")
+
+
 async def test_registry_update_refreshes_the_engines() -> None:
     """Pick up a feature entity that Home Assistant adds after startup."""
     async with _start_provider([_state("sensor.example", "Example")]) as (provider, hass):

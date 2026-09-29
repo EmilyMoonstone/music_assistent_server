@@ -32,6 +32,10 @@ if TYPE_CHECKING:
 # occurs in neither MA instance_ids nor Home Assistant entity_ids
 ENGINE_UID_SEPARATOR = "/"
 
+# speech handed to a speech-to-text engine is raw PCM: signed 16-bit little-endian, mono,
+# at this sample rate, which every Home Assistant STT engine takes
+STT_SAMPLE_RATE = 16000
+
 # payload accepted by ``on_source_control``: seek position (seconds) or volume level
 # for SEEK/VOLUME, the enabled state for SHUFFLE, the RepeatMode for REPEAT,
 # None for plain transport actions
@@ -69,6 +73,11 @@ class AIEngine(PluginEngine):
 @dataclass(kw_only=True)
 class TTSEngine(PluginEngine):
     """An engine that renders speech, invoked through ``PluginProvider.get_tts_message``."""
+
+
+@dataclass(kw_only=True)
+class STTEngine(PluginEngine):
+    """An engine that transcribes speech, invoked through ``PluginProvider.speech_to_text``."""
 
 
 class PluginProvider(Provider):
@@ -412,6 +421,41 @@ class PluginProvider(Provider):
         :param engine_id: The provider-scoped id of the engine to use (``AIEngine.id``,
             not its ``uid``). Omit or pass None to use the plugin's own default engine.
         :return: The AI response as a string.
+        """
+        raise NotImplementedError
+
+    async def get_stt_engines(self) -> list[STTEngine]:
+        """
+        Return the speech-to-text engines this plugin exposes.
+
+        There is no provider feature for speech-to-text, so this is asked of every plugin:
+        one without engines keeps the default of an empty list.
+
+        May change over time (e.g. when the backend adds or removes entities).
+
+        :return: A list of STTEngine items. Return an empty list if the plugin
+            currently has no engines to expose (e.g. the backend is offline).
+        """
+        return []
+
+    async def speech_to_text(
+        self,
+        audio: bytes,
+        language: str | None = None,
+        engine_id: str | None = None,
+    ) -> str:
+        """
+        Transcribe speech.
+
+        Will only be called on a plugin that returns engines from ``get_stt_engines``.
+
+        :param audio: The speech as raw PCM: signed 16-bit little-endian, mono, at
+            ``STT_SAMPLE_RATE``.
+        :param language: Optional language code like 'de-DE'. A plugin whose engine does not
+            know it may fall back to a close one (another region of the same language).
+        :param engine_id: The provider-scoped id of the engine to use (``STTEngine.id``,
+            not its ``uid``). Omit or pass None to use the plugin's own default engine.
+        :return: The recognised text, empty when the engine heard no words.
         """
         raise NotImplementedError
 

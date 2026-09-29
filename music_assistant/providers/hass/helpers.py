@@ -33,6 +33,34 @@ def is_entity_id(value: str) -> bool:
     return bool(ENTITY_ID_PATTERN.match(value))
 
 
+def pick_stt_language(wanted: str | None, languages: list[str]) -> str | None:
+    """
+    Return the language to ask a speech-to-text engine for, among the ones it supports.
+
+    Prefers the wanted language itself, then another region of it (the one named after the
+    language, like de-DE for de, first). Without a wanted language, the engine's first one.
+
+    :param wanted: The language code asked for, like 'de-DE' or 'de', or None.
+    :param languages: The language codes the engine lists as supported.
+    :return: The language to use, None when the engine supports no match for the wanted one.
+    """
+    if not languages:
+        return None
+    if not wanted:
+        return languages[0]
+    wanted = wanted.replace("_", "-").lower()
+    by_code = {language.lower(): language for language in languages}
+    if exact := by_code.get(wanted):
+        return exact
+    primary = wanted.split("-", 1)[0]
+    if own_region := by_code.get(f"{primary}-{primary}"):
+        return own_region
+    return next(
+        (language for code, language in by_code.items() if code.split("-", 1)[0] == primary),
+        None,
+    )
+
+
 def get_control_capabilities(state: State, logger: logging.Logger) -> ControlCapabilities:
     """
     Return the player control roles the given Home Assistant entity can serve.
