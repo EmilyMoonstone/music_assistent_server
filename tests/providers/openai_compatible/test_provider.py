@@ -16,6 +16,7 @@ from music_assistant_models.errors import (
     UnsupportedFeaturedException,
 )
 
+from music_assistant.models.plugin import AIAttachment
 from music_assistant.providers.openai_compatible import (
     SUPPORTED_FEATURES,
     OpenAICompatibleProvider,
@@ -527,6 +528,14 @@ async def test_ai_query_falls_back_to_first_configured_model(
     await provider.ai_query("hello", engine_id=None)
 
     assert mass.http_session.request.call_args.kwargs["json"]["model"] == "model-a"
+
+
+async def test_ai_query_refuses_attachments(provider: OpenAICompatibleProvider) -> None:
+    """The chat API it speaks takes no files, so a query with one fails clearly."""
+    _configure_models(provider, ["model-a"])
+
+    with pytest.raises(UnsupportedFeaturedException, match="cannot hand files"):
+        await provider.ai_query("hello", attachments=[AIAttachment(path="/media/a.mp3")])
 
 
 async def test_ai_query_raises_when_no_models_configured(
