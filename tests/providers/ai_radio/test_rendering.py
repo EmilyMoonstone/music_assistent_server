@@ -1917,3 +1917,29 @@ async def test_the_host_does_not_read_out_the_jingles_words() -> None:
 
     assert "never say, quote or paraphrase" in renderer.llm_prompts[0]
     assert renderer.tts_texts == ["Guten Abend."]
+
+
+@pytest.mark.parametrize("chance", [100, 0])
+async def test_the_host_does_not_read_out_any_jingle_of_the_station(chance: int) -> None:
+    """Words of a jingle that does not play are cut too, whether one plays or none does."""
+    renderer = DummyRenderer()
+    renderer._hosts["mika"] = {
+        "effects": normalize_effects(
+            {
+                "jingles": [
+                    {"source": "/media/a.mp3", "tags": [], "text": "Kopf aus, Lautsprecher an"},
+                    {"source": "/media/b.mp3", "tags": [], "text": "Staub auf der Nadel"},
+                ],
+                "jingle_chance": chance,
+            }
+        )
+    }
+    # with no jingle on offer the LLM is not asked to pick one, so it writes no choice line
+    choice_line = "JINGLE: 1\n" if chance else ""
+    renderer.llm_reply = f"{choice_line}Guten Abend. Staub auf der Nadel, Gold im Ohr."
+    item = _clip_item("sess_001", **TRANSITION)
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert renderer.tts_texts == ["Guten Abend. Gold im Ohr."]
