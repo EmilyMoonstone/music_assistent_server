@@ -50,6 +50,9 @@ from .constants import (
     ATTR_ALLOW_POST,
     ATTR_HOST_ID,
     ATTR_JINGLE,
+    ATTR_JINGLE_AFTER,
+    ATTR_JINGLE_AFTER_MODE,
+    ATTR_JINGLE_BEFORE_MODE,
     ATTR_MAX_CHARS,
     ATTR_PROMPT,
     ATTR_RENDERED_TEXT,
@@ -64,6 +67,8 @@ from .constants import (
     CLIP_STREAMDETAILS_EXPIRATION,
     CONF_TTS_LOUDNESS_BOOST,
     DEFAULT_EFFECT_LOUDNESS,
+    DEFAULT_JINGLE_AFTER_GAP_MINUTES,
+    DEFAULT_JINGLE_SLOT_MODE,
     DEFAULT_LEAD_IN_SECONDS,
     DEFAULT_MUSIC_BED_LEVEL,
     DEFAULT_TTS_LOUDNESS_BOOST,
@@ -92,6 +97,8 @@ from .constants import (
 from .effects import (
     ClipEffects,
     EffectSound,
+    JingleChoice,
+    after_jingle_candidates,
     dressed_duration,
     effect_filters,
     jingle_candidates,
@@ -99,7 +106,8 @@ from .effects import (
     jingle_occasion,
     pick_jingle,
     resolve_source,
-    take_jingle_choice,
+    take_jingle_choices,
+    wants_after_jingle,
 )
 from .helpers import coerce_float, coerce_int, format_ai_radio_timestamp, soft_limit_text
 from .post_window import lyric_onset
@@ -149,6 +157,20 @@ class _PostPlan:
 
 
 @dataclass(slots=True)
+class _JinglePlan:
+    """The jingles a break may open and close with, decided around its script."""
+
+    before: list[dict[str, Any]]
+    after: list[dict[str, Any]]
+    # the break's section asks for a closing jingle every time
+    after_always: bool
+    # whether the break closes with a jingle when the LLM leaves it open
+    rule_wants_after: bool
+    # the block asking the LLM to pick, "" when it is not asked
+    prompt: str
+
+
+@dataclass(slots=True)
 class _ClipAudio:
     """What get_audio_stream needs to serve a levelled clip, carried on StreamDetails.data."""
 
@@ -194,6 +216,7 @@ class AIRadioRenderMixin:
     _engine_loudness: dict[tuple[str, str, str], float]
     _effect_assets: dict[str, tuple[float, float]]
     _last_jingles: dict[str, str]
+    _last_after_jingles: dict[str, float]
 
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """
@@ -415,6 +438,10 @@ class AIRadioRenderMixin:
     ) -> _PostPlan | None:
         """Return the break's split over the next record, or None when it airs whole."""
         if not queue_item.extra_attributes.get(ATTR_ALLOW_POST):
+            return None
+        if queue_item.extra_attributes.get(ATTR_JINGLE_AFTER):
+            # the jingle closing the break leads into the song, so the voice stays off its intro
+            self._post_skipped(queue_item.name, "a jingle closes the break")
             return None
         if not hasattr(self, "_post_plans"):
             self._post_plans = {}
@@ -723,11 +750,9 @@ class AIRadioRenderMixin:
         web_mode = str(attributes.get(ATTR_WEB_SEARCH_MODE) or "disabled")
         news = _is_news_clip(queue_item)
         resolved = self._apply_break_memory(resolved, host_id, news=news)
-        effects = host.get("effects") or {}
-        jingles = self._jingle_candidates(queue_item, host_id, effects, news, prompt)
-        ask_llm = bool(jingles) and effects.get("jingle_selection") == "ai"
-        if ask_llm:
-            resolved = f"{resolved}\n\n{jingle_choice_prompt(jingles)}"
+        jingles = await self._plan_jingles(queue_item, host_id, news, prompt)
+        if jingles.prompt:
+            resolved = f"{resolved}\n\n{jingles.prompt}"
         try:
             text = cast(
                 "str",
@@ -744,14 +769,7 @@ class AIRadioRenderMixin:
             )
             self._record_skip(queue_item, f"generation failed: {err}")
             raise MediaNotFoundError(f"AI Radio clip {clip_id} failed to generate") from err
-        jingle: dict[str, Any] | None = None
-        if ask_llm:
-            jingle, text = take_jingle_choice(text, jingles)
-        if jingles and jingle is None:
-            jingle = pick_jingle(jingles, self._next_track_genres(queue_item))
-        attributes[ATTR_JINGLE] = jingle["source"] if jingle else ""
-        if jingle:
-            self._last_jingles_by_host()[host_id] = jingle["source"]
+        text = self._settle_jingles(queue_item, host_id, jingles, text)
         if max_chars > 0:
             text = soft_limit_text(text, max_chars=max_chars)
         self.logger.debug(
@@ -938,8 +956,9 @@ class AIRadioRenderMixin:
         effects = host["effects"]
         # the jingle was picked together with the script, so a replay airs the same one
         jingle_path = resolve_source(str(attributes.get(ATTR_JINGLE) or ""))
+        after_path = resolve_source(str(attributes.get(ATTR_JINGLE_AFTER) or ""))
         bed_path = resolve_source(str(effects.get("music_bed") or ""))
-        if not jingle_path and not bed_path:
+        if not jingle_path and not after_path and not bed_path:
             return None
         # the sounds sit relative to the voice, so they follow whatever level it airs at
         reference = self._wanted_loudness(queue_item.queue_id)
@@ -948,30 +967,139 @@ class AIRadioRenderMixin:
         bed_level = coerce_float(effects.get("music_bed_level"), DEFAULT_MUSIC_BED_LEVEL)
         jingle = await self._effect_sound(jingle_path, reference) if jingle_path else None
         bed = await self._effect_sound(bed_path, reference + bed_level) if bed_path else None
-        if jingle is None and bed is None:
+        after = await self._effect_sound(after_path, reference) if after_path else None
+        if jingle is None and bed is None and after is None:
             return None
-        return ClipEffects(jingle=jingle, bed=bed)
+        return ClipEffects(jingle=jingle, bed=bed, after=after)
+
+    async def _plan_jingles(
+        self, queue_item: QueueItem, host_id: str, news: bool, prompt: str
+    ) -> _JinglePlan:
+        """Return the jingles a break may open and close with, and what to ask the LLM."""
+        host = self._hosts.get(host_id) or {}
+        effects: dict[str, Any] = host.get("effects") or {}
+        occasion = self._jingle_occasion_of(queue_item, news, prompt)
+        before = self._jingle_candidates(queue_item, host_id, effects, occasion)
+        after, after_always = self._after_jingle_candidates(queue_item, host_id, effects, occasion)
+        # the song's timing only matters to a closing jingle that is still to be decided
+        vocal_onset = (
+            await self._next_vocal_onset(queue_item) if after and not after_always else None
+        )
+        # everything is decided in the call that writes the script, so it costs no extra
+        # request, only the few lines listing the jingles
+        ask_llm = bool(before or after) and effects.get("jingle_selection") == "ai"
+        return _JinglePlan(
+            before=before,
+            after=after,
+            after_always=after_always,
+            rule_wants_after=wants_after_jingle(occasion, vocal_onset),
+            prompt=(
+                jingle_choice_prompt(before, after, after_always, vocal_onset) if ask_llm else ""
+            ),
+        )
+
+    def _settle_jingles(
+        self, queue_item: QueueItem, host_id: str, plan: _JinglePlan, text: str
+    ) -> str:
+        """Record the jingles around a break, returning its script without the choice lines."""
+        choice = JingleChoice()
+        if plan.prompt:
+            choice, text = take_jingle_choices(text, plan.before, plan.after)
+        genres = self._next_track_genres(queue_item) if plan.before or plan.after else set()
+        jingle = choice.before
+        if plan.before and jingle is None:
+            jingle = pick_jingle(plan.before, genres)
+        closer = _closing_jingle(
+            choice, plan.after, plan.after_always, plan.rule_wants_after, jingle, genres
+        )
+        attributes = queue_item.extra_attributes
+        attributes[ATTR_JINGLE] = jingle["source"] if jingle else ""
+        attributes[ATTR_JINGLE_AFTER] = closer["source"] if closer else ""
+        if jingle:
+            self._last_jingles_by_host()[host_id] = jingle["source"]
+        if closer:
+            self._last_after_jingles_by_host()[host_id] = time.monotonic()
+        return text
+
+    @staticmethod
+    def _jingle_occasion_of(queue_item: QueueItem, news: bool, prompt: str) -> str:
+        """Return what a break is as far as its jingles go, see jingle_occasion."""
+        weather = any(token in prompt for token in WEATHER_PLACEHOLDER_TOKENS)
+        slot_when = str(queue_item.extra_attributes.get(ATTR_SLOT_WHEN) or "")
+        return jingle_occasion(news, weather, slot_when)
 
     def _jingle_candidates(
         self,
         queue_item: QueueItem,
         host_id: str,
         effects: dict[str, Any],
-        news: bool,
-        prompt: str,
+        occasion: str,
     ) -> list[dict[str, Any]]:
         """Return the jingles this break may open with, empty when it opens without one."""
         if not effects.get("jingles"):
             return []
-        weather = any(token in prompt for token in WEATHER_PLACEHOLDER_TOKENS)
-        slot_when = str(queue_item.extra_attributes.get(ATTR_SLOT_WHEN) or "")
-        occasion = jingle_occasion(news, weather, slot_when)
-        # news, weather and a show's ends always get theirs, a plain transition only now and then
+        mode = _jingle_mode(queue_item, ATTR_JINGLE_BEFORE_MODE)
+        if mode == "never":
+            return []
+        always = mode == "always"
+        # news, weather and a show's ends always get theirs, a plain transition only now and
+        # then, unless its section asks for one every time
         chance = coerce_int(effects.get("jingle_chance"), 0)
-        if occasion == "transition" and random.random() * 100 >= chance:
+        if not always and occasion == "transition" and random.random() * 100 >= chance:
             return []
         last = self._last_jingles_by_host().get(host_id, "")
-        return jingle_candidates(effects, occasion, self._configured_now().hour, last)
+        return jingle_candidates(effects, occasion, self._configured_now().hour, last, always)
+
+    def _after_jingle_candidates(
+        self,
+        queue_item: QueueItem,
+        host_id: str,
+        effects: dict[str, Any],
+        occasion: str,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """
+        Return the jingles this break may close with, and whether it closes with one for sure.
+
+        Left to itself a break closes with a jingle only now and then: never twice within the
+        host's gap, and never when no song follows to lead into.
+        """
+        if not effects.get("jingles"):
+            return [], False
+        mode = _jingle_mode(queue_item, ATTR_JINGLE_AFTER_MODE)
+        if mode == "never":
+            return [], False
+        always = mode == "always"
+        if not always:
+            next_item = self.mass.player_queues.get_next_item(
+                queue_item.queue_id, queue_item.queue_item_id
+            )
+            if next_item is None:
+                return [], False
+            gap_minutes = coerce_int(
+                effects.get("jingle_after_gap_minutes"), DEFAULT_JINGLE_AFTER_GAP_MINUTES
+            )
+            last = self._last_after_jingles_by_host().get(host_id)
+            if last is not None and time.monotonic() - last < gap_minutes * 60:
+                return [], False
+        hour = self._configured_now().hour
+        return after_jingle_candidates(effects, occasion, hour, always), always
+
+    async def _next_vocal_onset(self, queue_item: QueueItem) -> float | None:
+        """
+        Return the second the song after a clip starts singing, None when unknown.
+
+        Lets a jingle bridge into a song that sings right away. The timing comes from the
+        song's synced lyrics, the same that place a post.
+
+        :param queue_item: The clip whose next song to look at.
+        """
+        next_item = self.mass.player_queues.get_next_item(
+            queue_item.queue_id, queue_item.queue_item_id
+        )
+        if next_item is None:
+            return None
+        onset, _reason = await self._resolve_vocal_onset(next_item)
+        return onset
 
     def _next_track_genres(self, queue_item: QueueItem) -> set[str]:
         """Return the lowercase genres of the track after a clip, empty when unknown."""
@@ -987,6 +1115,12 @@ class AIRadioRenderMixin:
         if not hasattr(self, "_last_jingles"):
             self._last_jingles = {}
         return self._last_jingles
+
+    def _last_after_jingles_by_host(self) -> dict[str, float]:
+        """Return when each host last closed a break with a jingle, in monotonic seconds."""
+        if not hasattr(self, "_last_after_jingles"):
+            self._last_after_jingles = {}
+        return self._last_after_jingles
 
     async def _effect_sound(self, path: str, target: float) -> EffectSound | None:
         """
@@ -1059,6 +1193,41 @@ def _is_news_clip(queue_item: QueueItem) -> bool:
     return str(attributes.get(ATTR_WEB_SEARCH_MODE) or "") == "force" or (
         RECENT_NEWS_PLACEHOLDER in str(attributes.get(ATTR_PROMPT) or "")
     )
+
+
+def _jingle_mode(queue_item: QueueItem, key: str) -> str:
+    """Return what a clip's section says about one of its jingles, see JINGLE_SLOT_MODES."""
+    return str(queue_item.extra_attributes.get(key) or DEFAULT_JINGLE_SLOT_MODE)
+
+
+def _closing_jingle(
+    choice: JingleChoice,
+    after: list[dict[str, Any]],
+    always: bool,
+    rule_wants_one: bool,
+    opener: dict[str, Any] | None,
+    genres: set[str],
+) -> dict[str, Any] | None:
+    """
+    Return the jingle that closes a break, None when it goes straight into the song.
+
+    :param choice: What the LLM answered, if it was asked.
+    :param after: The jingles offered to close the break.
+    :param always: The break's section asks for a closing jingle every time.
+    :param rule_wants_one: Whether the break closes with one when the LLM did not decide.
+    :param opener: The jingle opening the same break.
+    :param genres: The genres of the next song, lowercase.
+    """
+    if not after:
+        return None
+    closer = choice.after
+    if closer is None and (always or (not choice.after_answered and rule_wants_one)):
+        # the same jingle at both ends sounds like a mistake, so another one closes if it can
+        others = [jingle for jingle in after if opener is None or jingle is not opener]
+        closer = pick_jingle(others or after, genres)
+    if closer is not None and closer is opener and not always:
+        return None
+    return closer
 
 
 def _has_effects(host: dict[str, Any]) -> bool:

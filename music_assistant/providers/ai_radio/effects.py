@@ -1,4 +1,4 @@
-"""Sound effects a host puts around its breaks: jingles ahead of them and a music bed below."""
+"""Sound effects a host puts around its breaks: jingles around them and a music bed below."""
 
 from __future__ import annotations
 
@@ -14,15 +14,25 @@ from music_assistant.constants import ANNOUNCE_ALERT_FILE
 from music_assistant.helpers.dsp import ComplexFilter, ComplexFilterInput
 
 from .constants import (
+    DEFAULT_JINGLE_AFTER_GAP_MINUTES,
     DEFAULT_JINGLE_CHANCE,
     DEFAULT_JINGLE_SELECTION,
+    DEFAULT_JINGLE_SLOT_MODE,
     DEFAULT_LEAD_IN,
     DEFAULT_LEAD_IN_SECONDS,
     DEFAULT_MUSIC_BED_LEVEL,
     DEFAULT_POST_DUCK_PERCENT,
     EFFECT_BUILTIN_JINGLE,
-    JINGLE_CHOICE_INSTRUCTION,
+    JINGLE_AFTER_ALWAYS_INSTRUCTION,
+    JINGLE_AFTER_AUTO_INSTRUCTION,
+    JINGLE_AFTER_EARLY_VOCAL_SECONDS,
+    JINGLE_AFTER_GAP_RANGE,
+    JINGLE_AFTER_ONSET_HINT,
+    JINGLE_BEFORE_INSTRUCTION,
+    JINGLE_CHOICE_CLOSING,
+    JINGLE_LIST_HEADER,
     JINGLE_OCCASION_TAGS,
+    JINGLE_PROMPT_TEXT_CHARS,
     JINGLE_SELECTION_MODES,
     JINGLE_SLOT_OCCASIONS,
     JINGLE_TIME_TAGS,
@@ -41,9 +51,12 @@ from .constants import (
 )
 from .helpers import coerce_float, coerce_int
 
-# the reply line the LLM names its jingle on, at the very start of its answer
+# the reply lines the LLM names its jingles on, at the very start of its answer
 _JINGLE_CHOICE_LINE = re.compile(
     r"^\s*\**\s*JINGLE\s*:\s*\**\s*(\d+|none)\s*\**\s*$", re.IGNORECASE | re.MULTILINE
+)
+_AFTER_CHOICE_LINE = re.compile(
+    r"^\s*\**\s*AFTER\s*:\s*\**\s*(\d+|none)\s*\**\s*$", re.IGNORECASE | re.MULTILINE
 )
 
 
@@ -62,6 +75,18 @@ class ClipEffects:
 
     jingle: EffectSound | None = None
     bed: EffectSound | None = None
+    # the jingle closing the break, leading into the next song
+    after: EffectSound | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JingleChoice:
+    """What the LLM answered about a break's jingles."""
+
+    before: dict[str, Any] | None = None
+    after: dict[str, Any] | None = None
+    # whether it answered on the after line at all: "none" is an answer, silence is not
+    after_answered: bool = False
 
 
 def default_effects() -> dict[str, Any]:
@@ -70,6 +95,7 @@ def default_effects() -> dict[str, Any]:
         "jingles": [],
         "jingle_chance": DEFAULT_JINGLE_CHANCE,
         "jingle_selection": DEFAULT_JINGLE_SELECTION,
+        "jingle_after_gap_minutes": DEFAULT_JINGLE_AFTER_GAP_MINUTES,
         "music_bed": "",
         "music_bed_level": DEFAULT_MUSIC_BED_LEVEL,
         "lead_in": DEFAULT_LEAD_IN,
@@ -104,6 +130,9 @@ def normalize_effects(raw: Any) -> dict[str, Any]:
     normalized["jingle_selection"] = (
         selection if selection in JINGLE_SELECTION_MODES else DEFAULT_JINGLE_SELECTION
     )
+    low_gap, high_gap = JINGLE_AFTER_GAP_RANGE
+    gap = coerce_int(effects.get("jingle_after_gap_minutes"), DEFAULT_JINGLE_AFTER_GAP_MINUTES)
+    normalized["jingle_after_gap_minutes"] = min(high_gap, max(low_gap, gap))
     bed = str(effects.get("music_bed") or "").strip()
     if bed == EFFECT_BUILTIN_JINGLE:
         raise InvalidDataError("There is no built-in music bed, set a file path or URL")
@@ -128,6 +157,19 @@ def normalize_effects(raw: Any) -> dict[str, Any]:
     return normalized
 
 
+def merge_jingle_modes(modes: list[str]) -> str:
+    """
+    Return the jingle mode of a break merged from several sections, see JINGLE_SLOT_MODES.
+
+    :param modes: The modes of the merged sections, "" for one that set none.
+    """
+    if "always" in modes:
+        return "always"
+    if modes and all(mode == "never" for mode in modes):
+        return "never"
+    return DEFAULT_JINGLE_SLOT_MODE
+
+
 def jingle_occasion(news: bool, weather: bool, slot_when: str) -> str:
     """
     Return what a break is, as far as picking its jingle goes.
@@ -147,7 +189,11 @@ def jingle_occasion(news: bool, weather: bool, slot_when: str) -> str:
 
 
 def jingle_candidates(
-    effects: dict[str, Any], occasion: str, hour: int, last_source: str = ""
+    effects: dict[str, Any],
+    occasion: str,
+    hour: int,
+    last_source: str = "",
+    always: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Return the jingles that fit a break, or an empty list when it opens without one.
@@ -156,30 +202,79 @@ def jingle_candidates(
     :param occasion: What the break is, see jingle_occasion.
     :param hour: The local hour the break airs at.
     :param last_source: The jingle the host played last, avoided when there is a choice.
+    :param always: The break's section asks for a jingle, so one without the occasion's tag
+        stands in when none carries it.
     """
     jingles: list[dict[str, Any]] = effects.get("jingles") or []
-    general = [
-        jingle
-        for jingle in jingles
-        if "general" in jingle["tags"] or not set(jingle["tags"]) & set(JINGLE_OCCASION_TAGS)
-    ]
+    general = _general_jingles(jingles)
     if occasion == "transition":
         pool = general
     else:
         pool = [jingle for jingle in jingles if occasion in jingle["tags"]]
         # a show still gets its ident from the general jingles, news and weather do not
-        if not pool and occasion in ("intro", "outro"):
+        if not pool and (always or occasion in ("intro", "outro")):
             pool = general
+    if not pool and always:
+        pool = list(jingles)
+    pool = _timed(pool, hour)
+    if len(pool) > 1 and last_source:
+        pool = [jingle for jingle in pool if jingle["source"] != last_source] or pool
+    return pool
+
+
+def after_jingle_candidates(
+    effects: dict[str, Any], occasion: str, hour: int, always: bool = False
+) -> list[dict[str, Any]]:
+    """
+    Return the jingles that can close a break and lead into the next song.
+
+    The ones tagged for the break's occasion (a news closer after the news) come first,
+    then the general ones.
+
+    :param effects: The normalized effects of the host speaking the break.
+    :param occasion: What the break is, see jingle_occasion.
+    :param hour: The local hour the break airs at.
+    :param always: The break's section asks for a jingle, so any jingle stands in when
+        none fits.
+    """
+    jingles: list[dict[str, Any]] = effects.get("jingles") or []
+    tagged = [jingle for jingle in jingles if occasion in jingle["tags"]]
+    pool = tagged + [jingle for jingle in _general_jingles(jingles) if jingle not in tagged]
+    if not pool and always:
+        pool = list(jingles)
+    return _timed(pool, hour)
+
+
+def wants_after_jingle(occasion: str, vocal_onset: float | None) -> bool:
+    """
+    Return whether a break closes with a jingle when no LLM decided it.
+
+    :param occasion: What the break is, see jingle_occasion.
+    :param vocal_onset: The second the next song starts singing, None when unknown.
+    """
+    if occasion == "news":
+        return True
+    return vocal_onset is not None and vocal_onset < JINGLE_AFTER_EARLY_VOCAL_SECONDS
+
+
+def _general_jingles(jingles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the jingles tagged general, or for no occasion at all."""
+    return [
+        jingle
+        for jingle in jingles
+        if "general" in jingle["tags"] or not set(jingle["tags"]) & set(JINGLE_OCCASION_TAGS)
+    ]
+
+
+def _timed(pool: list[dict[str, Any]], hour: int) -> list[dict[str, Any]]:
+    """Return the jingles of a pool that fit the hour, the whole pool when none does."""
     now_tag = time_of_day_tag(hour)
     timed = [
         jingle
         for jingle in pool
         if now_tag in jingle["tags"] or not set(jingle["tags"]) & set(JINGLE_TIME_TAGS)
     ]
-    pool = timed or pool
-    if len(pool) > 1 and last_source:
-        pool = [jingle for jingle in pool if jingle["source"] != last_source] or pool
-    return pool
+    return timed or pool
 
 
 def pick_jingle(
@@ -199,32 +294,96 @@ def pick_jingle(
     return rng.choice(matching or candidates)
 
 
-def jingle_choice_prompt(candidates: list[dict[str, Any]]) -> str:
-    """Return the prompt block that asks the LLM to pick one of the given jingles."""
-    lines = [JINGLE_CHOICE_INSTRUCTION]
-    for number, jingle in enumerate(candidates, start=1):
+def numbered_jingles(
+    before: list[dict[str, Any]], after: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Return the jingles offered for either end of a break, each once, in prompt order."""
+    numbered = list(before)
+    numbered += [jingle for jingle in after if jingle not in numbered]
+    return numbered
+
+
+def jingle_choice_prompt(
+    before: list[dict[str, Any]],
+    after: list[dict[str, Any]] | None = None,
+    after_always: bool = False,
+    vocal_onset: float | None = None,
+) -> str:
+    """
+    Return the prompt block asking the LLM to pick the jingles around a break.
+
+    Every jingle is listed once, so a jingle on offer at both ends costs its words once.
+
+    :param before: The jingles the break may open with, empty when it opens without one.
+    :param after: The jingles that may close it, empty when it closes without one.
+    :param after_always: The break closes with a jingle whatever the LLM thinks of it.
+    :param vocal_onset: The second the next song starts singing, None when unknown.
+    """
+    after = after or []
+    numbered = numbered_jingles(before, after)
+    lines = [JINGLE_LIST_HEADER]
+    for number, jingle in enumerate(numbered, start=1):
         tags = ", ".join(jingle["tags"]) or "general"
-        said = f'"{jingle["text"]}"' if jingle["text"] else "(no words given)"
-        lines.append(f"{number}. [{tags}] {said}")
+        words = jingle["text"][:JINGLE_PROMPT_TEXT_CHARS]
+        lines.append(f'{number}. [{tags}] "{words}"' if words else f"{number}. [{tags}] -")
+    if before:
+        lines.append(JINGLE_BEFORE_INSTRUCTION.format(numbers=_numbers_of(before, numbered)))
+    if after:
+        numbers = _numbers_of(after, numbered)
+        if after_always:
+            lines.append(JINGLE_AFTER_ALWAYS_INSTRUCTION.format(numbers=numbers))
+        else:
+            onset = (
+                JINGLE_AFTER_ONSET_HINT.format(seconds=vocal_onset)
+                if vocal_onset is not None
+                else ""
+            )
+            lines.append(JINGLE_AFTER_AUTO_INSTRUCTION.format(numbers=numbers, onset=onset))
+    lines.append(JINGLE_CHOICE_CLOSING)
     return "\n".join(lines)
 
 
-def take_jingle_choice(
-    text: str, candidates: list[dict[str, Any]]
-) -> tuple[dict[str, Any] | None, str]:
+def take_jingle_choices(
+    text: str, before: list[dict[str, Any]], after: list[dict[str, Any]] | None = None
+) -> tuple[JingleChoice, str]:
     """
-    Return the jingle the LLM named and its script with the choice line taken out.
+    Return the jingles the LLM named and its script with the choice lines taken out.
+
+    A number outside the jingles offered for that end of the break counts as no choice.
 
     :param text: The LLM's reply.
-    :param candidates: The jingles it was offered, in the order they were numbered.
+    :param before: The jingles it was offered to open the break with.
+    :param after: The jingles it was offered to close the break with.
     """
-    choice: dict[str, Any] | None = None
-    if (match := _JINGLE_CHOICE_LINE.search(text)) is not None:
-        answer = match.group(1).lower()
-        if answer.isdigit() and 1 <= int(answer) <= len(candidates):
-            choice = candidates[int(answer) - 1]
-    # the line never reaches the listener, whether it named a valid jingle or not
-    return choice, _JINGLE_CHOICE_LINE.sub("", text).strip()
+    after = after or []
+    numbered = numbered_jingles(before, after)
+    before_choice = _named_jingle(_JINGLE_CHOICE_LINE.search(text), numbered, before)
+    after_match = _AFTER_CHOICE_LINE.search(text)
+    choice = JingleChoice(
+        before=before_choice,
+        after=_named_jingle(after_match, numbered, after),
+        after_answered=after_match is not None,
+    )
+    # the lines never reach the listener, whether they named a valid jingle or not
+    script = _AFTER_CHOICE_LINE.sub("", _JINGLE_CHOICE_LINE.sub("", text)).strip()
+    return choice, script
+
+
+def _numbers_of(pool: list[dict[str, Any]], numbered: list[dict[str, Any]]) -> str:
+    """Return the prompt numbers of a pool's jingles, like '1, 3'."""
+    return ", ".join(str(numbered.index(jingle) + 1) for jingle in pool)
+
+
+def _named_jingle(
+    match: re.Match[str] | None, numbered: list[dict[str, Any]], pool: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Return the jingle a reply line named, when it is one of the pool's."""
+    if match is None or not (answer := match.group(1)).isdigit():
+        return None
+    number = int(answer)
+    if not 1 <= number <= len(numbered) or (jingle := numbered[number - 1]) not in pool:
+        return None
+    return jingle
 
 
 def time_of_day_tag(hour: int) -> str:
@@ -294,7 +453,23 @@ def effect_filters(effects: ClipEffects, voice_seconds: int | None) -> list[str 
                 ],
             )
         )
+    if (after := effects.after) is not None:
+        closer = ComplexFilterInput(path=after.path, filters=f"volume={round(after.gain_db, 2)}dB")
+        overlap = _after_overlap(effects)
+        # with a bed the closer comes in over its fading tail, without one right after the voice
+        body = (
+            f"acrossfade=d={overlap}:c1=nofade:c2=nofade" if overlap > 0 else "concat=n=2:v=0:a=1"
+        )
+        filters.append(ComplexFilter(body=body, inputs=[closer]))
     return filters
+
+
+def _after_overlap(effects: ClipEffects) -> float:
+    """Return the seconds the closing jingle overlaps the bed's tail, 0 without a bed."""
+    if effects.after is None or effects.bed is None:
+        return 0.0
+    # acrossfade needs both sides to be at least as long as the overlap
+    return round(min(MUSIC_BED_TAIL_SECONDS, effects.after.seconds / 2), 2)
 
 
 def dressed_duration(effects: ClipEffects, voice_seconds: int | None) -> int | None:
@@ -311,6 +486,8 @@ def dressed_duration(effects: ClipEffects, voice_seconds: int | None) -> int | N
         seconds += MUSIC_BED_TAIL_SECONDS + 1
     if effects.jingle is not None:
         seconds += max(0.0, effects.jingle.seconds - JINGLE_VOICE_OVERLAP_SECONDS)
+    if effects.after is not None:
+        seconds += effects.after.seconds - _after_overlap(effects)
     return math.ceil(seconds)
 
 

@@ -25,6 +25,7 @@ from music_assistant.models.plugin import VoiceOver
 from music_assistant.providers.ai_radio.constants import (
     ATTR_ALLOW_POST,
     ATTR_HOST_ID,
+    ATTR_JINGLE_AFTER,
     POST_CLIP_MAX_AGE,
     POST_CLIP_PREFIX,
     POST_STAGED_FORMAT,
@@ -204,6 +205,24 @@ async def test_break_that_is_not_postable_is_left_alone(staged: Path) -> None:
     assert await renderer._plan_post(clip, _MEDIA, _CLIP_ID, gain_db=0.0) is None
     assert renderer.onset_lookups == 0
     assert await _voice_over(renderer, track) is None
+
+
+async def test_break_closed_by_a_jingle_does_not_post(staged: Path) -> None:
+    """A jingle after the break leads into the record, so the voice stays off its intro."""
+    clip, track = _break_item(), _track_item("song")
+    clip.extra_attributes[ATTR_JINGLE_AFTER] = "/media/closer.mp3"
+    renderer = PostRenderer(staged, [clip, track])
+    assert await renderer._plan_post(clip, _MEDIA, _CLIP_ID, gain_db=0.0) is None
+    assert renderer.onset_lookups == 0
+    assert await _voice_over(renderer, track) is None
+
+
+async def test_the_llm_learns_when_the_next_song_sings(staged: Path) -> None:
+    """The vocal timing that places a post also tells whether a jingle should bridge in."""
+    clip, track = _break_item(), _track_item("song")
+    renderer = PostRenderer(staged, [clip, track])
+    assert await renderer._next_vocal_onset(clip) == pytest.approx(renderer.onset)
+    assert await renderer._next_vocal_onset(track) is None
 
 
 async def test_repeat_request_gets_the_same_split(staged: Path) -> None:

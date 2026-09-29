@@ -366,3 +366,21 @@ def test_normalize_station_v3_returns_slim_schema() -> None:
     assert normalized["host_id"] == "rick"
     for legacy_key in ("general", "sections", "section_ids", "section_order", "merge_section_id"):
         assert legacy_key not in normalized
+
+
+def test_normalize_section_keeps_its_jingle_modes() -> None:
+    """A section may ask for its jingles every time or never; auto is not stored."""
+    storage = DummyStorage()
+    base = {"id": "News", "name": "News", "type": "ai_text", "prompt": "News prompt"}
+
+    normalized = storage._normalize_section(
+        {**base, "jingle_before": "Always", "jingle_after": "never"}
+    )
+    plain = storage._normalize_section({**base, "jingle_before": "auto"})
+
+    assert normalized["jingle_before"] == "always"
+    assert normalized["jingle_after"] == "never"
+    assert "jingle_before" not in plain
+    assert "jingle_after" not in plain
+    with pytest.raises(InvalidDataError, match="invalid jingle_after"):
+        storage._normalize_section({**base, "jingle_after": "sometimes"})

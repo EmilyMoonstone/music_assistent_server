@@ -19,7 +19,9 @@ from music_assistant.helpers.json import async_json_dumps, async_json_loads
 from .constants import (
     AI_ORDER_MAX_TRACKS_RANGE,
     DEFAULT_AI_ORDER_MAX_TRACKS,
+    DEFAULT_JINGLE_SLOT_MODE,
     EMPTY_SECTION_ID,
+    JINGLE_SLOT_MODES,
     MERGE_SECTION_PROMPT,
     TRACK_ORDER_AI,
     TRACK_ORDER_MODES,
@@ -208,6 +210,16 @@ class AIRadioStorageMixin:
             # only stored when on, like the constraints: a missing key reads as off everywhere
             if section.get("allow_post"):
                 normalized["allow_post"] = True
+            # only stored when set, like the constraints: a missing key reads as auto
+            for key in ("jingle_before", "jingle_after"):
+                mode = str(section.get(key) or DEFAULT_JINGLE_SLOT_MODE).strip().lower()
+                if mode not in JINGLE_SLOT_MODES:
+                    raise InvalidDataError(
+                        f"Section '{section_id}' has invalid {key} '{mode}', "
+                        f"expected one of {', '.join(JINGLE_SLOT_MODES)}"
+                    )
+                if mode != DEFAULT_JINGLE_SLOT_MODE:
+                    normalized[key] = mode
         for passthrough_key in ("cover_image",):
             if passthrough_key in section:
                 normalized[passthrough_key] = section[passthrough_key]

@@ -38,6 +38,9 @@ class PlannedSection:
     weather_required: bool = False
     # when true, the section's break may be split so its tail plays over the next record's intro
     allow_post: bool = False
+    # what the section says about a jingle ahead of and after its break, see JINGLE_SLOT_MODES
+    jingle_before: str = "auto"
+    jingle_after: str = "auto"
     # the guard history events this plan claimed, as (section_id, (song, minute)). a caller
     # that drops the plan can drop these too, so a clip that never aired carries no weight
     history_events: list[tuple[str, tuple[int, float]]] = field(default_factory=list)

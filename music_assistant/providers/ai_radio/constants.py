@@ -159,6 +159,12 @@ POST_STAGED_FORMAT = AudioFormat(
     bit_depth=TTS_CLIP_PCM_FORMAT.bit_depth,
     channels=TTS_CLIP_PCM_FORMAT.channels,
 )
+# the jingle picked to close a clip, leading into the next song, "" for none
+ATTR_JINGLE_AFTER = "ai_radio_jingle_after"
+# what the clip's section says about a jingle ahead of and after its break, see
+# JINGLE_SLOT_MODES
+ATTR_JINGLE_BEFORE_MODE = "ai_radio_jingle_before_mode"
+ATTR_JINGLE_AFTER_MODE = "ai_radio_jingle_after_mode"
 
 # placeholders resolved at render time rather than at plan time, so the aired script
 # reflects the moment it plays
@@ -232,12 +238,36 @@ JINGLE_FILE_EXTENSIONS = frozenset(
     {".mp3", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".wav", ".aiff", ".aif", ".wma"}
 )
 MAX_JINGLE_TEXT_CHARS = 300
-# the LLM that writes a break also picks its jingle, answering on a line of its own
-JINGLE_CHOICE_INSTRUCTION = (
-    "A jingle plays right before you speak. Pick the one that fits this moment best "
-    "(time of day, the music around it, what the jingle says). Start your reply with a line "
-    "'JINGLE: <number>' and write the script after it. You may pick up on the jingle's words, "
-    "but do not repeat them. The options:"
+# a section's say on the jingle ahead of and after its break: "auto" leaves it to the host
+# (and, for the one after, to the LLM), "always" and "never" settle it
+JINGLE_SLOT_MODES = ("auto", "always", "never")
+DEFAULT_JINGLE_SLOT_MODE = "auto"
+# a break closes with a jingle of its own accord at most this often, in minutes per host
+DEFAULT_JINGLE_AFTER_GAP_MINUTES = 30
+JINGLE_AFTER_GAP_RANGE = (0, 240)
+# a song singing this soon after it starts leaves no intro to talk over, so a jingle
+# bridges into it instead
+JINGLE_AFTER_EARLY_VOCAL_SECONDS = 3.0
+# what a jingle says is cut to this in the prompt: enough to pick by, few tokens
+JINGLE_PROMPT_TEXT_CHARS = 120
+# the LLM that writes a break also picks its jingles, answering on lines of their own
+JINGLE_LIST_HEADER = "Jingles (number. [tags] words):"
+JINGLE_BEFORE_INSTRUCTION = (
+    "Start your reply with a line 'JINGLE: <number>' for the jingle right before you speak "
+    "({numbers})."
+)
+JINGLE_AFTER_AUTO_INSTRUCTION = (
+    "Then a line 'AFTER: <number or none>' for a jingle after you, into the next song "
+    "({numbers}). Mostly none: only where it fits, like closing the news or when the song "
+    "sings right away.{onset}"
+)
+JINGLE_AFTER_ALWAYS_INSTRUCTION = (
+    "Then a line 'AFTER: <number>' for the jingle after you, into the next song ({numbers})."
+)
+JINGLE_AFTER_ONSET_HINT = " The next song's vocals start after {seconds:.0f}s."
+JINGLE_CHOICE_CLOSING = (
+    "Pick by time of day, the music around and the words. You may pick up on a jingle's "
+    "words, do not repeat them. Then the script."
 )
 # how the song before blends into a break: a hard cut, a crossfade, or a talk-up where the
 # break starts at full level over the song's fading outro

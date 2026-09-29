@@ -2325,3 +2325,37 @@ async def test_run_session_reports_a_queue_stop_as_stopped() -> None:
 
     assert session.status == "stopped"
     assert session.ended_at is not None
+
+
+def test_planned_sections_carry_their_jingle_modes() -> None:
+    """A section's jingle modes travel with it, merged ones combined."""
+    runtime = DummyRuntime()
+    _set_runtime_mass(runtime, SimpleNamespace(metadata=SimpleNamespace(locale="en_US")))
+    tracks = [
+        {"index": 0, "songinfo": "A - One", "duration": 200},
+        {"index": 1, "songinfo": "B - Two", "duration": 200},
+    ]
+    single = _weather_guarded_station()
+    single["sections"][0]["jingle_after"] = "always"
+    merged = _merge_weather_news_station()
+    merged["sections"][0]["jingle_before"] = "never"
+    merged["sections"][1]["jingle_before"] = "never"
+    merged["sections"][1]["jingle_after"] = "always"
+
+    def plan(program: dict[str, Any]) -> Any:
+        planned, _history = runtime._plan_sections(
+            session_id="sess",
+            tracks=tracks,
+            program=program,
+            track_index_offset=0,
+            minute_offset=0.0,
+            history_state={},
+            allowed_slot_when=["between_songs"],
+            runtime_tokens={"<weather_hourly>": "12 degrees"},
+        )
+        return planned[0]
+
+    alone, together = plan(single), plan(merged)
+
+    assert (alone.jingle_before, alone.jingle_after) == ("auto", "always")
+    assert (together.jingle_before, together.jingle_after) == ("never", "always")

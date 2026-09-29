@@ -44,6 +44,9 @@ from music_assistant.providers.ai_radio.constants import (
     ATTR_ALLOW_POST,
     ATTR_HOST_ID,
     ATTR_JINGLE,
+    ATTR_JINGLE_AFTER,
+    ATTR_JINGLE_AFTER_MODE,
+    ATTR_JINGLE_BEFORE_MODE,
     ATTR_MAX_CHARS,
     ATTR_PROMPT,
     ATTR_RENDERED_TEXT,
@@ -1742,3 +1745,152 @@ async def test_a_break_no_queue_holds_gets_no_lead_in() -> None:
     _attach_queue(renderer, [])
 
     assert renderer.get_lead_in(cast("Any", SimpleNamespace(item_id="sess_404"))) is None
+
+
+async def test_the_llm_closes_a_break_with_a_jingle_into_the_next_song() -> None:
+    """With a song to follow, the LLM may name a closer; neither line is voiced."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer)
+    renderer.next_genres = set()
+    renderer.llm_reply = "JINGLE: 1\nAFTER: 2\nGood evening."
+    item = _clip_item("sess_001", **TRANSITION)
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert "'AFTER: <number or none>'" in renderer.llm_prompts[0]
+    assert item.extra_attributes[ATTR_JINGLE] == "/media/calm.mp3"
+    assert item.extra_attributes[ATTR_JINGLE_AFTER] == "/media/indie.mp3"
+    assert renderer.tts_texts == ["Good evening."]
+
+
+async def test_closing_jingles_keep_the_hosts_gap() -> None:
+    """Once a break closed with a jingle, the next ones are not even offered one."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer)
+    renderer.next_genres = set()
+    renderer.llm_reply = "JINGLE: 1\nAFTER: 2\nGood evening."
+    items = [_clip_item(f"sess_00{n}", **TRANSITION) for n in (1, 2)]
+    _attach_queue(renderer, items)
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+    await renderer.get_stream_details("sess_002", MediaType.SOUND_EFFECT)
+
+    assert "AFTER" not in renderer.llm_prompts[1]
+    assert items[1].extra_attributes[ATTR_JINGLE_AFTER] == ""
+
+
+async def test_a_declined_closer_keeps_the_gap_open() -> None:
+    """'none' closes nothing, so the next break may still be offered one."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer)
+    renderer.next_genres = set()
+    renderer.llm_reply = "JINGLE: 1\nAFTER: none\nGood evening."
+    items = [_clip_item(f"sess_00{n}", **TRANSITION) for n in (1, 2)]
+    _attach_queue(renderer, items)
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+    await renderer.get_stream_details("sess_002", MediaType.SOUND_EFFECT)
+
+    assert items[0].extra_attributes[ATTR_JINGLE_AFTER] == ""
+    assert "AFTER" in renderer.llm_prompts[1]
+
+
+async def test_no_closing_jingle_without_a_song_to_lead_into() -> None:
+    """The last break of a show is not offered a closer."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer)
+    item = _clip_item("sess_001", **TRANSITION)
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert "AFTER" not in renderer.llm_prompts[0]
+    assert item.extra_attributes[ATTR_JINGLE_AFTER] == ""
+
+
+async def test_a_section_decides_its_jingles_itself() -> None:
+    """'always' opens a transition despite a 0% chance, 'never' keeps the closer away."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer, chance=0)
+    renderer.next_genres = set()
+    renderer.llm_reply = "JINGLE: 2\nGood evening."
+    item = _clip_item(
+        "sess_001",
+        **TRANSITION,
+        **{ATTR_JINGLE_BEFORE_MODE: "always", ATTR_JINGLE_AFTER_MODE: "never"},
+    )
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert "AFTER" not in renderer.llm_prompts[0]
+    assert item.extra_attributes[ATTR_JINGLE] == "/media/indie.mp3"
+    assert item.extra_attributes[ATTR_JINGLE_AFTER] == ""
+
+
+async def test_a_news_section_can_go_without_its_jingle() -> None:
+    """'never' leaves even the news bare."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer, selection="random")
+    item = _clip_item(
+        "sess_001",
+        **{ATTR_HOST_ID: "mika", ATTR_WEB_SEARCH_MODE: "force", ATTR_JINGLE_BEFORE_MODE: "never"},
+    )
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert item.extra_attributes[ATTR_JINGLE] == ""
+
+
+async def test_without_the_llm_the_news_closes_with_another_jingle() -> None:
+    """Left to chance, the news closes with a jingle other than the one it opened with."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer, selection="random")
+    renderer.next_genres = set()
+    item = _clip_item("sess_001", **{ATTR_HOST_ID: "mika", ATTR_WEB_SEARCH_MODE: "force"})
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert item.extra_attributes[ATTR_JINGLE] == "/media/news.mp3"
+    assert item.extra_attributes[ATTR_JINGLE_AFTER] in {"/media/calm.mp3", "/media/indie.mp3"}
+
+
+async def test_a_plain_transition_left_to_chance_closes_bare() -> None:
+    """Without the LLM and without a reason, a transition goes straight into the song."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer, selection="random")
+    renderer.next_genres = set()
+    item = _clip_item("sess_001", **TRANSITION)
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert item.extra_attributes[ATTR_JINGLE_AFTER] == ""
+
+
+async def test_the_closing_jingle_is_mixed_in_after_the_voice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The picked closer is levelled like the opener and lengthens the announced break."""
+    _stub_sound_tags(monkeypatch, seconds=3.0)
+    renderer = DummyRenderer()
+    _host_with_effects(renderer, jingles=[{"source": "/media/closer.mp3", "tags": []}])
+    item = _clip_item(
+        "sess_001",
+        **{
+            ATTR_HOST_ID: "mika",
+            ATTR_JINGLE_BEFORE_MODE: "never",
+            ATTR_JINGLE_AFTER_MODE: "always",
+        },
+    )
+    _attach_queue(renderer, [item])
+
+    streamdetails = await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    effects = streamdetails.data.effects
+    assert item.extra_attributes[ATTR_JINGLE_AFTER] == "/media/closer.mp3"
+    assert effects.after.path == "/media/closer.mp3"
+    assert streamdetails.duration == 9 + 3
