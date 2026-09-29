@@ -544,6 +544,9 @@ def test_opening_and_closing_jingles_build_one_filtergraph() -> None:
         ("Hier ist Mika, kopf aus lautsprecher an, und los.", "Hier ist Mika, und los."),
         # two words are too common to be the jingle's own
         ("Das ist die erste Platte heute.", "Das ist die erste Platte heute."),
+        # a line of short sentences is matched as a whole, across its full stops
+        ("München leuchtet. Mika hier. Heute wird es warm.", "Heute wird es warm."),
+        ("Mika hier, gleich kommt Musik.", "Mika hier, gleich kommt Musik."),
     ],
 )
 def test_a_script_does_not_repeat_its_jingles(script: str, expected: str) -> None:
@@ -552,6 +555,7 @@ def test_a_script_does_not_repeat_its_jingles(script: str, expected: str) -> Non
         {"text": "Kurz und knapp. Was draussen passiert."},
         {"text": "Kopf aus, Lautsprecher an"},
         {"text": "Erste Platte."},
+        {"text": "München leuchtet. Mika hier."},
     ]
 
     assert strip_jingle_words(script, jingles) == expected

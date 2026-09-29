@@ -575,6 +575,10 @@ class AIRadioRenderMixin:
         vocal_onset = (
             await self._next_vocal_onset(queue_item) if after and not after_always else None
         )
+        # a break that can carry over the song's intro does that rather than close with a
+        # jingle, which would keep it off the intro
+        if after and not after_always and self._post_fits(queue_item, vocal_onset):
+            after = []
         # everything is decided in the call that writes the script, so it costs no extra
         # request, only the few lines listing the jingles
         ask_llm = bool(before or after) and effects.get("jingle_selection") == "ai"
@@ -687,6 +691,18 @@ class AIRadioRenderMixin:
         :param queue_item: The clip whose next song to look at.
         """
         return None
+
+    def _post_fits(self, queue_item: QueueItem, vocal_onset: float | None) -> bool:
+        """
+        Return whether a break is set to carry over the next song's intro, and it has one.
+
+        Without the post support no break carries over, so a closing jingle is never held
+        back for one.
+
+        :param queue_item: The clip to look at.
+        :param vocal_onset: The second the next song starts singing, None when unknown.
+        """
+        return False
 
     def _next_track_genres(self, queue_item: QueueItem) -> set[str]:
         """Return the lowercase genres of the track after a clip, empty when unknown."""
