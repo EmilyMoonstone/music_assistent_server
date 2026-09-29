@@ -589,6 +589,23 @@ async def test_a_jingle_is_previewed_through_a_short_lived_link(provider: Any, m
 
 
 @pytest.mark.asyncio
+async def test_a_preview_link_never_carries_the_file_name(provider: Any, media: Path) -> None:
+    """Umlauts and spaces stay out of the link, which still serves the file."""
+    announce = _preview_mass(provider)
+    jingle = media / "ai_radio" / "jingles" / "Für die Szene.MP3"
+    jingle.write_bytes(b"jingle")
+
+    await provider.preview_jingle(str(jingle), "kitchen")
+
+    url = announce.call_args.args[1]
+    assert url.isascii()
+    assert "Szene" not in url
+    assert url.endswith(".mp3")
+    response = await provider._serve_jingle_preview(_preview_request(url))
+    assert Path(response._path) == jingle.resolve()
+
+
+@pytest.mark.asyncio
 async def test_an_expired_or_unknown_preview_link_serves_nothing(
     provider: Any, media: Path
 ) -> None:
