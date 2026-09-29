@@ -747,7 +747,10 @@ class AIRadioProvider(
         }
         token = uuid4().hex
         self._jingle_previews[token] = (path, now + JINGLE_PREVIEW_SECONDS)
-        return f"{self.mass.streams.base_url}{JINGLE_PREVIEW_ROUTE}/{token}{path.suffix}"
+        # the link only carries the token and a known extension, never the file name, so a
+        # name with umlauts or spaces cannot trip up the player fetching it
+        suffix = path.suffix.lower() if path.suffix.lower() in JINGLE_FILE_EXTENSIONS else ""
+        return f"{self.mass.streams.base_url}{JINGLE_PREVIEW_ROUTE}/{token}{suffix}"
 
     async def _serve_jingle_preview(self, request: web.Request) -> web.StreamResponse:
         """Serve the jingle a preview link was made for, while the link is still valid."""

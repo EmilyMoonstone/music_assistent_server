@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import re
-from pathlib import PurePosixPath
+import shutil
+import time
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NamedTuple
+from uuid import uuid4
 
 from .constants import MediaPlayerEntityFeature, parse_supported_features
 
@@ -19,6 +22,13 @@ ENTITY_ID_PATTERN = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 # serves as its "local" media source
 HA_MEDIA_ROOT = PurePosixPath("/media")
 HA_LOCAL_MEDIA_SOURCE = "media-source://media_source/local"
+# Home Assistant's AI integrations pass a file's name on, Google's in an HTTP header that
+# only takes ASCII; a file named with anything beyond these characters is handed over as a
+# copy under a neutral name, in a hidden folder Home Assistant's media browser leaves out
+SAFE_ATTACHMENT_NAME = re.compile(r"[A-Za-z0-9._-]+")
+AI_ATTACHMENT_STAGING_DIR = ".music_assistant_ai"
+# a copy left behind by a query that never finished is removed once it is this old
+AI_ATTACHMENT_MAX_AGE = 3600
 
 
 class ControlCapabilities(NamedTuple):
@@ -44,6 +54,49 @@ def media_source_id(path: str) -> str | None:
     if not relative.parts:
         return None
     return f"{HA_LOCAL_MEDIA_SOURCE}/{relative.as_posix()}"
+
+
+def is_safe_attachment_path(path: str) -> bool:
+    """
+    Return whether a file can be handed to an AI integration under its own name.
+
+    :param path: The absolute path of the file.
+    """
+    return all(SAFE_ATTACHMENT_NAME.fullmatch(part) for part in PurePosixPath(path).parts[1:])
+
+
+def stage_attachment(source: str, media_root: str = str(HA_MEDIA_ROOT)) -> str:
+    """
+    Copy a file to a neutral name in the shared media folder, and return the copy's path.
+
+    Blocking: run it in an executor. Copies older than AI_ATTACHMENT_MAX_AGE, left by
+    queries that never finished, are removed on the way.
+
+    :param source: The file to copy.
+    :param media_root: The shared media folder, as Music Assistant sees it.
+    """
+    staging = Path(media_root) / AI_ATTACHMENT_STAGING_DIR
+    staging.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - AI_ATTACHMENT_MAX_AGE
+    for leftover in staging.iterdir():
+        try:
+            if leftover.is_file() and leftover.stat().st_mtime < cutoff:
+                leftover.unlink()
+        except OSError:
+            # another query removed it first
+            continue
+    suffix = PurePosixPath(source).suffix
+    if not SAFE_ATTACHMENT_NAME.fullmatch(suffix or "."):
+        suffix = ""
+    target = staging / f"attachment_{uuid4().hex}{suffix}"
+    shutil.copyfile(source, target)
+    return f"{media_root.rstrip('/')}/{AI_ATTACHMENT_STAGING_DIR}/{target.name}"
+
+
+def remove_staged_attachments(paths: list[str]) -> None:
+    """Remove the copies stage_attachment made, ignoring ones already gone. Blocking."""
+    for path in paths:
+        Path(path).unlink(missing_ok=True)
 
 
 def is_entity_id(value: str) -> bool:

@@ -106,6 +106,7 @@ from .effects import (
     jingle_occasion,
     pick_jingle,
     resolve_source,
+    strip_jingle_words,
     take_jingle_choices,
     wants_after_jingle,
 )
@@ -1019,7 +1020,7 @@ class AIRadioRenderMixin:
             self._last_jingles_by_host()[host_id] = jingle["source"]
         if closer:
             self._last_after_jingles_by_host()[host_id] = time.monotonic()
-        return text
+        return strip_jingle_words(text, [item for item in (jingle, closer) if item])
 
     @staticmethod
     def _jingle_occasion_of(queue_item: QueueItem, news: bool, prompt: str) -> str:
