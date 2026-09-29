@@ -3124,6 +3124,7 @@ class StreamsAudio:
                     voice_end=voice_over.end,
                     voice_offset=voice_over.offset,
                     chunk_size=pcm_format.pcm_sample_size,
+                    duck_depth=voice_over.duck_depth,
                 )
             ) as mixed:
                 async for chunk in mixed:

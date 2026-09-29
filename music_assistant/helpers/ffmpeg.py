@@ -486,6 +486,7 @@ async def get_ffmpeg_voice_over_stream(
     voice_end: float,
     voice_offset: float = 0.0,
     chunk_size: int | None = None,
+    duck_depth: float | None = None,
 ) -> AsyncGenerator[bytes]:
     """
     Mix a one-shot voice clip into a PCM stream, ducking the music under it.
@@ -500,10 +501,12 @@ async def get_ffmpeg_voice_over_stream(
     :param voice_end: Second at which the voice ends.
     :param voice_offset: Second of the clip to start reading from.
     :param chunk_size: Optional exact chunk size for the yielded audio.
+    :param duck_depth: Fraction of the music's level removed under the voice (0-1), the
+        default depth when None.
     """
     filter_params: list[str | ComplexFilter] = [
         # the duck applies to the music alone, so it precedes the two-input mixer
-        _build_voice_over_duck_filter(voice_start, voice_end),
+        _build_voice_over_duck_filter(voice_start, voice_end, duck_depth),
         _build_voice_over_mixer(voice_path, pcm_format, voice_start, voice_offset),
         f"alimiter=limit={VOICE_OVER_MIX_CEILING_DB}dB:level=false:latency=true",
     ]
@@ -851,15 +854,18 @@ def _get_overlay_volume_filter(overlay_volume: int, output_channels: int) -> str
     return f"volume={gain}*{_MONO_WIDEN_COMPENSATION}^not(nb_channels-1)"
 
 
-def _build_voice_over_duck_filter(voice_start: float, voice_end: float) -> str:
+def _build_voice_over_duck_filter(
+    voice_start: float, voice_end: float, duck_depth: float | None = None
+) -> str:
     """Build the volume envelope that ducks the music under a voice-over."""
+    depth = VOICE_OVER_DUCK_DEPTH if duck_depth is None else min(1.0, max(0.0, duck_depth))
     # a voice already talking at t=0 gives a negative start, which the expression's own
     # clamping turns into a full duck from the first sample
     duck_start = voice_start - VOICE_OVER_DUCK_RAMP
     duck_end = voice_end + VOICE_OVER_DUCK_RAMP
     # commas are ffmpeg argument separators, so the ones inside the expression are escaped
     envelope = (
-        rf"1-{VOICE_OVER_DUCK_DEPTH:.4f}*max(0\,min(1\,min("
+        rf"1-{depth:.4f}*max(0\,min(1\,min("
         rf"(t-{duck_start:.3f})/{VOICE_OVER_DUCK_RAMP:.3f}\,"
         rf"({duck_end:.3f}-t)/{VOICE_OVER_DUCK_RAMP:.3f})))"
     )

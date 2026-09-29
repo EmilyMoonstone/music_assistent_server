@@ -19,6 +19,7 @@ from .constants import (
     DEFAULT_LEAD_IN,
     DEFAULT_LEAD_IN_SECONDS,
     DEFAULT_MUSIC_BED_LEVEL,
+    DEFAULT_POST_DUCK_PERCENT,
     EFFECT_BUILTIN_JINGLE,
     JINGLE_CHOICE_INSTRUCTION,
     JINGLE_OCCASION_TAGS,
@@ -33,6 +34,10 @@ from .constants import (
     MUSIC_BED_FADE_IN_SECONDS,
     MUSIC_BED_LEVEL_RANGE,
     MUSIC_BED_TAIL_SECONDS,
+    POST_DUCK_RANGE,
+    POST_GAP_RANGE,
+    POST_MAX_RANGE,
+    POST_TAIL_GAP,
 )
 from .helpers import coerce_float, coerce_int
 
@@ -69,6 +74,9 @@ def default_effects() -> dict[str, Any]:
         "music_bed_level": DEFAULT_MUSIC_BED_LEVEL,
         "lead_in": DEFAULT_LEAD_IN,
         "lead_in_seconds": DEFAULT_LEAD_IN_SECONDS,
+        "post_gap_seconds": POST_TAIL_GAP,
+        "post_max_seconds": 0.0,
+        "post_duck_percent": DEFAULT_POST_DUCK_PERCENT,
     }
 
 
@@ -110,6 +118,13 @@ def normalize_effects(raw: Any) -> dict[str, Any]:
     low, high = LEAD_IN_SECONDS_RANGE
     seconds = coerce_float(effects.get("lead_in_seconds"), DEFAULT_LEAD_IN_SECONDS)
     normalized["lead_in_seconds"] = min(high, max(low, seconds))
+    for key, default, (minimum, maximum) in (
+        ("post_gap_seconds", POST_TAIL_GAP, POST_GAP_RANGE),
+        ("post_max_seconds", 0.0, POST_MAX_RANGE),
+        ("post_duck_percent", DEFAULT_POST_DUCK_PERCENT, POST_DUCK_RANGE),
+    ):
+        value = coerce_float(effects.get(key), default)
+        normalized[key] = min(float(maximum), max(float(minimum), value))
     return normalized
 
 

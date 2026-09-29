@@ -85,6 +85,8 @@ class VoiceOver:
     start: float  # second of the next item at which the voice begins
     end: float  # second of the next item at which the voice ends
     offset: float = 0.0  # second of the file to start reading from
+    # fraction of the music's level removed under the voice, None for the default
+    duck_depth: float | None = None
 
 
 @dataclass(kw_only=True)

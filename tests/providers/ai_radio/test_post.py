@@ -24,6 +24,7 @@ from music_assistant_models.streamdetails import StreamDetails
 from music_assistant.models.plugin import VoiceOver
 from music_assistant.providers.ai_radio.constants import (
     ATTR_ALLOW_POST,
+    ATTR_HOST_ID,
     POST_CLIP_MAX_AGE,
     POST_CLIP_PREFIX,
     POST_STAGED_FORMAT,
@@ -32,6 +33,7 @@ from music_assistant.providers.ai_radio.constants import (
     TTS_PEAK_CEILING_DB,
     TTS_SPEECHNORM_FILTER,
 )
+from music_assistant.providers.ai_radio.effects import normalize_effects
 from music_assistant.providers.ai_radio.rendering import AIRadioRenderMixin, _ClipAudio, _PostPlan
 
 _QUEUE_ID = "player_a"
@@ -66,6 +68,7 @@ class PostRenderer(AIRadioRenderMixin):
         self.break_seconds = _BREAK_SECONDS
         self.onset_lookups = 0
         self.stagings = 0
+        self._hosts: dict[str, dict[str, Any]] = {}
         cast("Any", self).mass = SimpleNamespace(
             player_queues=SimpleNamespace(get_next_item=self._next_item)
         )
@@ -691,3 +694,63 @@ async def test_item_that_is_not_a_track_has_no_vocal_onset() -> None:
     """Only a track has lyrics to read the vocal entry from."""
     renderer = _lyrics_renderer(AsyncMock())
     assert await renderer._resolve_vocal_onset(_break_item()) == (None, "no track details")
+
+
+def _host_break(renderer: PostRenderer, **effects: Any) -> QueueItem:
+    """Return a break spoken by host 'mika', whose effects carry the given post options."""
+    renderer._hosts["mika"] = {"effects": normalize_effects(effects)}
+    clip = _break_item()
+    clip.extra_attributes[ATTR_HOST_ID] = "mika"
+    return clip
+
+
+async def test_the_host_sets_the_gap_before_the_vocal(staged: Path) -> None:
+    """A longer gap ends the voice earlier, leaving more music before the singing."""
+    renderer = PostRenderer(staged, [])
+    clip = _host_break(renderer, post_gap_seconds=2.0)
+    renderer.order = [clip, _track_item("song")]
+
+    plan = await renderer._plan_post(clip, _MEDIA, _CLIP_ID, gain_db=-2.0)
+
+    assert plan is not None
+    assert plan.overlap == pytest.approx(_VOCAL_ONSET - 2.0)
+    assert plan.head == pytest.approx(_BREAK_SECONDS - (_VOCAL_ONSET - 2.0))
+
+
+async def test_the_host_caps_how_long_it_talks_over_the_intro(staged: Path) -> None:
+    """With a cap the tail covers only that much of a long intro."""
+    renderer = PostRenderer(staged, [])
+    clip = _host_break(renderer, post_max_seconds=4.0)
+    renderer.order = [clip, _track_item("song")]
+
+    plan = await renderer._plan_post(clip, _MEDIA, _CLIP_ID, gain_db=-2.0)
+
+    assert plan is not None
+    assert plan.overlap == pytest.approx(4.0)
+
+
+async def test_the_host_sets_how_far_the_music_drops_under_the_voice(staged: Path) -> None:
+    """The duck depth reaches the voice-over the streams side mixes."""
+    renderer = PostRenderer(staged, [])
+    clip = _host_break(renderer, post_duck_percent=30)
+    track = _track_item("song")
+    renderer.order = [clip, track]
+    await renderer._plan_post(clip, _MEDIA, _CLIP_ID, gain_db=-2.0)
+
+    voice_over = await _voice_over(renderer, track)
+
+    assert voice_over is not None
+    assert voice_over.duck_depth == pytest.approx(0.3)
+
+
+async def test_a_host_without_post_options_keeps_the_defaults(staged: Path) -> None:
+    """Without options the split and the duck stay as they always were."""
+    clip, track = _break_item(), _track_item("song")
+    renderer = PostRenderer(staged, [clip, track])
+    await renderer._plan_post(clip, _MEDIA, _CLIP_ID, gain_db=-2.0)
+
+    voice_over = await _voice_over(renderer, track)
+
+    assert voice_over is not None
+    assert voice_over.end == pytest.approx(_OVERLAP)
+    assert voice_over.duck_depth == pytest.approx(0.6)

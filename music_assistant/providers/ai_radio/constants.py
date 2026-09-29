@@ -137,6 +137,12 @@ ATTR_ALLOW_POST = "ai_radio_allow_post"
 # the break airs alone for B - overlap seconds, then the record starts underneath it and
 # the same recording's last `overlap` seconds play over the intro.
 POST_TAIL_GAP = 0.4  # seconds of music between the end of the voice and the vocal entry
+# what a host can change about its posts: the gap before the vocal, the longest stretch it
+# talks over the intro (0 for no cap), and how far the music drops under the voice
+POST_GAP_RANGE = (0.0, 3.0)
+POST_MAX_RANGE = (0.0, 30.0)
+DEFAULT_POST_DUCK_PERCENT = 60
+POST_DUCK_RANGE = (0, 90)
 POST_MIN_SECONDS = 1.5  # shortest overlap worth doing; below it the break plays whole
 POST_MIN_HEAD_SECONDS = 1.0  # the break keeps at least this much for its own queue item
 # MA's lyrics lookup walks every metadata provider; past this budget the break plays whole

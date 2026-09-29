@@ -141,6 +141,8 @@ class _PostPlan:
     clip_item_id: str  # the break
     track_item_id: str  # the record its tail airs over
     track_name: str
+    # fraction of the record's level removed under the tail, as the host is set up to
+    duck_depth: float | None = None
     # whether the tail is still due to air over the record; settled when the break's audio
     # is produced, and cleared once the streams side is done with it
     armed: bool = True
@@ -314,7 +316,13 @@ class AIRadioRenderMixin:
         ):
             return None
         # start 0: the voice is already talking when the record comes in
-        return VoiceOver(path=plan.staged, start=0.0, end=plan.overlap, offset=plan.head)
+        return VoiceOver(
+            path=plan.staged,
+            start=0.0,
+            end=plan.overlap,
+            offset=plan.head,
+            duck_depth=plan.duck_depth,
+        )
 
     async def on_voice_over_ended(self, streamdetails: StreamDetails, aired: bool) -> None:
         """
@@ -429,7 +437,13 @@ class AIRadioRenderMixin:
         if onset is None:
             self._post_skipped(next_item.name, reason)
             return None
-        window = onset - POST_TAIL_GAP
+        host = self._hosts.get(str(queue_item.extra_attributes.get(ATTR_HOST_ID) or "")) or {}
+        host_effects: dict[str, Any] = host.get("effects") or {}
+        gap = coerce_float(host_effects.get("post_gap_seconds"), POST_TAIL_GAP)
+        window = onset - gap
+        # a cap keeps the host from talking over a long intro all the way to the vocal
+        if (max_overlap := coerce_float(host_effects.get("post_max_seconds"), 0.0)) > 0:
+            window = min(window, max_overlap)
         if window < POST_MIN_SECONDS:
             self._post_skipped(
                 next_item.name, f"vocal enters at {onset:.1f}s, too little instrumental intro"
@@ -461,6 +475,7 @@ class AIRadioRenderMixin:
             clip_item_id=queue_item.queue_item_id,
             track_item_id=next_item.queue_item_id,
             track_name=next_item.name,
+            duck_depth=coerce_float(host_effects.get("post_duck_percent"), 60) / 100,
         )
         self.logger.info(
             "AI Radio post armed on %s: break %.1fs airs alone for %.1fs, last %.1fs "

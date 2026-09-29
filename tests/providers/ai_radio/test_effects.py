@@ -360,3 +360,18 @@ def test_the_lead_in_is_kept_to_known_modes_and_a_sane_length() -> None:
     assert normalize_effects({"lead_in": "wobble"})["lead_in"] == "cut"
     assert normalize_effects({"lead_in_seconds": 30})["lead_in_seconds"] == high
     assert normalize_effects({"lead_in_seconds": 0})["lead_in_seconds"] == low
+
+
+def test_post_options_default_to_the_old_behaviour_and_stay_in_range() -> None:
+    """Without options a post keeps its 0.4s gap, no cap and a 60% duck."""
+    defaults = default_effects()
+
+    assert defaults["post_gap_seconds"] == 0.4
+    assert defaults["post_max_seconds"] == 0.0
+    assert defaults["post_duck_percent"] == 60
+    clamped = normalize_effects(
+        {"post_gap_seconds": 10, "post_max_seconds": -5, "post_duck_percent": 150}
+    )
+    assert clamped["post_gap_seconds"] == 3.0
+    assert clamped["post_max_seconds"] == 0.0
+    assert clamped["post_duck_percent"] == 90.0

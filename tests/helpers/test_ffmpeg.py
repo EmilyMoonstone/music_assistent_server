@@ -1635,3 +1635,15 @@ async def test_check_ffmpeg_version_keeps_the_check_when_the_probe_exits_nonzero
     await check_ffmpeg_version()
 
     assert get_global_cache_value(CACHE_ATTR_HLS_CMAF_BLOCKED) is False
+
+
+def test_the_voice_over_duck_depth_can_be_set_per_voice_over() -> None:
+    """A voice-over's own depth replaces the default, kept within 0 and 1."""
+    from music_assistant.helpers.ffmpeg import (  # noqa: PLC0415
+        VOICE_OVER_DUCK_DEPTH,
+        _build_voice_over_duck_filter,
+    )
+
+    assert f"1-{VOICE_OVER_DUCK_DEPTH:.4f}*" in _build_voice_over_duck_filter(0, 5)
+    assert "1-0.3000*" in _build_voice_over_duck_filter(0, 5, 0.3)
+    assert "1-1.0000*" in _build_voice_over_duck_filter(0, 5, 7.0)
