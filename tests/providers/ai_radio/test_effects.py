@@ -12,6 +12,7 @@ from music_assistant.constants import ANNOUNCE_ALERT_FILE
 from music_assistant.helpers.dsp import ComplexFilter
 from music_assistant.helpers.ffmpeg import get_ffmpeg_args
 from music_assistant.providers.ai_radio.constants import (
+    DEFAULT_JINGLE_AFTER_GAP_MINUTES,
     DEFAULT_JINGLE_CHANCE,
     DEFAULT_MUSIC_BED_LEVEL,
     MAX_JINGLES,
@@ -22,6 +23,7 @@ from music_assistant.providers.ai_radio.constants import (
 from music_assistant.providers.ai_radio.effects import (
     ClipEffects,
     EffectSound,
+    after_jingle_candidates,
     default_effects,
     dressed_duration,
     effect_filters,
@@ -29,11 +31,13 @@ from music_assistant.providers.ai_radio.effects import (
     jingle_choice_prompt,
     jingle_occasion,
     jingle_text_from_lyrics,
+    merge_jingle_modes,
     normalize_effects,
     pick_jingle,
     resolve_source,
-    take_jingle_choice,
+    take_jingle_choices,
     time_of_day_tag,
+    wants_after_jingle,
 )
 
 JINGLE = EffectSound(path="/media/jingle.mp3", seconds=2.4, gain_db=-3.0)
@@ -237,8 +241,10 @@ def test_the_llm_is_offered_numbered_jingles_with_their_words() -> None:
 
     prompt = jingle_choice_prompt(effects["jingles"])
 
-    assert "JINGLE: <number>" in prompt
+    assert "'JINGLE: <number>'" in prompt
+    assert "(1)" in prompt
     assert '1. [calm] "Mika hier."' in prompt
+    assert "AFTER" not in prompt
 
 
 @pytest.mark.parametrize(
@@ -256,9 +262,10 @@ def test_the_choice_line_is_read_and_never_spoken(
     """A valid number picks its jingle, and the line is stripped either way."""
     candidates = _library(("/media/a.mp3", []), ("/media/b.mp3", []))["jingles"]
 
-    choice, text = take_jingle_choice(reply, candidates)
+    choice, text = take_jingle_choices(reply, candidates)
 
-    assert (choice["source"] if choice else None) == expected_source
+    assert (choice.before["source"] if choice.before else None) == expected_source
+    assert choice.after is None
     assert text == expected_text
 
 
@@ -348,3 +355,178 @@ def test_the_announced_duration_covers_jingle_and_bed_tail() -> None:
     assert dressed_duration(effects, 10) == 15
     assert dressed_duration(ClipEffects(), 10) == 10
     assert dressed_duration(effects, None) is None
+
+
+CLOSER = EffectSound(path="/media/closer.mp3", seconds=3.0, gain_db=-1.0)
+
+
+def test_the_gap_between_closing_jingles_is_kept_in_range() -> None:
+    """The gap defaults, and is clamped to what the editor offers."""
+    assert normalize_effects(None)["jingle_after_gap_minutes"] == DEFAULT_JINGLE_AFTER_GAP_MINUTES
+    assert normalize_effects({"jingle_after_gap_minutes": -5})["jingle_after_gap_minutes"] == 0
+    assert normalize_effects({"jingle_after_gap_minutes": 999})["jingle_after_gap_minutes"] == 240
+
+
+@pytest.mark.parametrize(
+    ("modes", "expected"),
+    [
+        (["", "always"], "always"),
+        (["never", "never"], "never"),
+        (["never", ""], "auto"),
+        (["never", "auto"], "auto"),
+        ([], "auto"),
+    ],
+)
+def test_merged_sections_share_one_jingle_mode(modes: list[str], expected: str) -> None:
+    """A jingle any part asks for plays; one is left out only when every part leaves it."""
+    assert merge_jingle_modes(modes) == expected
+
+
+def test_a_section_asking_for_a_jingle_gets_one_even_without_a_fitting_tag() -> None:
+    """News without a news jingle stays bare, unless its section asks for one every time."""
+    general = _library(("/media/general.mp3", []))
+    only_weather = _library(("/media/weather.mp3", ["weather"]))
+
+    assert jingle_candidates(general, "news", 12) == []
+    assert [j["source"] for j in jingle_candidates(general, "news", 12, always=True)] == [
+        "/media/general.mp3"
+    ]
+    # nothing general either, so any jingle stands in
+    assert [j["source"] for j in jingle_candidates(only_weather, "news", 12, always=True)] == [
+        "/media/weather.mp3"
+    ]
+
+
+def test_a_closing_jingle_prefers_the_occasions_own() -> None:
+    """After the news its closer comes first, then the general ones; others never close."""
+    effects = _library(
+        ("/media/general.mp3", []),
+        ("/media/news.mp3", ["news"]),
+        ("/media/weather.mp3", ["weather"]),
+    )
+
+    news = [j["source"] for j in after_jingle_candidates(effects, "news", 12)]
+    plain = [j["source"] for j in after_jingle_candidates(effects, "transition", 12)]
+
+    assert news == ["/media/news.mp3", "/media/general.mp3"]
+    assert plain == ["/media/general.mp3"]
+    assert after_jingle_candidates(_library(("/media/news.mp3", ["news"])), "transition", 12) == []
+    assert len(after_jingle_candidates(_library(("/media/news.mp3", ["news"])), "x", 12, True)) == 1
+
+
+@pytest.mark.parametrize(
+    ("occasion", "onset", "expected"),
+    [
+        ("news", None, True),
+        ("transition", None, False),
+        ("transition", 0.5, True),
+        ("transition", 12.0, False),
+    ],
+)
+def test_without_the_llm_a_break_closes_after_the_news_or_into_early_vocals(
+    occasion: str, onset: float | None, expected: bool
+) -> None:
+    """The rule closes the news, and bridges into a song that sings right away."""
+    assert wants_after_jingle(occasion, onset) is expected
+
+
+def test_both_ends_share_one_numbered_list() -> None:
+    """A jingle on offer at both ends is listed once, and each end names its numbers."""
+    effects = _library(("/media/a.mp3", ["news"]), ("/media/b.mp3", []), ("/media/c.mp3", []))
+    before = effects["jingles"][:2]
+    after = effects["jingles"][1:]
+
+    prompt = jingle_choice_prompt(before, after, vocal_onset=1.4)
+
+    assert prompt.count("/media") == 0
+    assert prompt.count("[general]") == 2
+    assert "'JINGLE: <number>'" in prompt
+    assert "(1, 2)" in prompt
+    assert "'AFTER: <number or none>'" in prompt
+    assert "(2, 3)" in prompt
+    assert "after 1s" in prompt
+
+
+def test_a_closing_jingle_asked_for_every_time_cannot_be_declined() -> None:
+    """The after line then offers no 'none'."""
+    effects = _library(("/media/a.mp3", []))
+
+    prompt = jingle_choice_prompt([], effects["jingles"], after_always=True)
+
+    assert "JINGLE:" not in prompt
+    assert "'AFTER: <number>'" in prompt
+
+
+def test_long_jingle_words_are_cut_in_the_prompt() -> None:
+    """Only the start of long words is sent, enough to pick by."""
+    effects = normalize_effects({"jingles": [{"source": "/media/a.mp3", "text": "la " * 100}]})
+
+    prompt = jingle_choice_prompt(effects["jingles"])
+
+    assert len(prompt.splitlines()[1]) < 140
+
+
+@pytest.mark.parametrize(
+    ("reply", "before", "after", "answered"),
+    [
+        ("JINGLE: 1\nAFTER: 3\nHallo.", "/media/a.mp3", "/media/c.mp3", True),
+        ("JINGLE: 2\nAFTER: none\nHallo.", "/media/b.mp3", None, True),
+        # 1 is only on offer to open the break
+        ("JINGLE: 2\nAFTER: 1\nHallo.", "/media/b.mp3", None, True),
+        ("JINGLE: 1\nHallo.", "/media/a.mp3", None, False),
+    ],
+)
+def test_both_choice_lines_are_read_and_never_spoken(
+    reply: str, before: str, after: str | None, answered: bool
+) -> None:
+    """Each line picks from its own end's jingles, and neither is voiced."""
+    effects = _library(("/media/a.mp3", []), ("/media/b.mp3", []), ("/media/c.mp3", []))
+
+    choice, text = take_jingle_choices(reply, effects["jingles"][:2], effects["jingles"][1:])
+
+    assert choice.before is not None
+    assert choice.before["source"] == before
+    assert (choice.after["source"] if choice.after else None) == after
+    assert choice.after_answered is answered
+    assert text == "Hallo."
+
+
+def test_a_closing_jingle_follows_the_voice() -> None:
+    """Without a bed the closer is appended right after the voice."""
+    filters = effect_filters(ClipEffects(after=CLOSER), voice_seconds=10)
+
+    closer = filters[-1]
+    assert isinstance(closer, ComplexFilter)
+    assert closer.body == "concat=n=2:v=0:a=1"
+    assert closer.inputs[0].path == CLOSER.path
+    assert closer.inputs[0].filters == "volume=-1.0dB"
+    assert dressed_duration(ClipEffects(after=CLOSER), 10) == 13
+
+
+def test_a_closing_jingle_comes_in_over_the_fading_bed() -> None:
+    """With a bed the closer overlaps its tail instead of waiting for it to die out."""
+    effects = ClipEffects(bed=BED, after=CLOSER)
+
+    closer = effect_filters(effects, voice_seconds=10)[-1]
+
+    assert isinstance(closer, ComplexFilter)
+    assert closer.body == "acrossfade=d=1.5:c1=nofade:c2=nofade"
+    # 10s of voice, 3s of bed tail, the 3s closer overlapping it by 1.5s
+    assert dressed_duration(effects, 10) == 15
+
+
+def test_opening_and_closing_jingles_build_one_filtergraph() -> None:
+    """The opener leads, the closer trails, both in the same graph as the voice."""
+    filters = effect_filters(ClipEffects(jingle=JINGLE, bed=BED, after=CLOSER), voice_seconds=10)
+
+    args = get_ffmpeg_args(
+        input_format=TTS_CLIP_PCM_FORMAT,
+        output_format=TTS_CLIP_PCM_FORMAT,
+        filter_params=filters,
+        input_path="/media/voice.mp3",
+    )
+
+    graph = args[args.index("-filter_complex") + 1]
+    assert args.count("-i") == 4
+    order = ["duration=first", "adelay", "duration=longest", "acrossfade"]
+    assert [graph.index(step) for step in order] == sorted(graph.index(step) for step in order)
