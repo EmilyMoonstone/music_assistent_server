@@ -12,7 +12,7 @@ from music_assistant_models.errors import (
     UnsupportedFeaturedException,
 )
 
-from music_assistant.models.plugin import AIEngine, PluginProvider
+from music_assistant.models.plugin import AIAttachment, AIEngine, PluginProvider
 
 from .constants import (
     CHAT_REQUEST_TIMEOUT,
@@ -24,6 +24,8 @@ from .constants import (
 from .helpers import chat_completion, list_models
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from music_assistant_models.config_entries import ProviderConfig
     from music_assistant_models.provider import ProviderManifest
 
@@ -77,8 +79,16 @@ class OpenAICompatibleProvider(PluginProvider):
             AIEngine(id=model, name=model, provider=self) for model in self._configured_models()
         ]
 
-    async def ai_query(self, query: str, engine_id: str | None = None) -> str:
+    async def ai_query(
+        self,
+        query: str,
+        engine_id: str | None = None,
+        attachments: Sequence[AIAttachment] | None = None,
+    ) -> str:
         """Handle an AI query."""
+        if attachments:
+            msg = "The OpenAI-compatible provider cannot hand files to its models"
+            raise UnsupportedFeaturedException(msg)
         model = engine_id or next(iter(self._configured_models()), None)
         if model is None:
             msg = "No model is selected for this provider"

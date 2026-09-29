@@ -22,6 +22,7 @@ from music_assistant_models.errors import (
 
 from music_assistant.constants import CONF_LOG_LEVEL
 from music_assistant.helpers.tts import TTSLanguageNotSupportedError
+from music_assistant.models.plugin import AIAttachment
 from music_assistant.providers.hass import (
     CONF_AUTH_TOKEN,
     CONF_URL,
@@ -648,6 +649,49 @@ async def test_ai_query_uses_the_requested_engine() -> None:
 
         service_data = hass.send_command.call_args.kwargs["service_data"]
         assert service_data["entity_id"] == "ai_task.second"
+
+
+async def test_ai_query_hands_files_from_the_media_folder_to_the_ai_task() -> None:
+    """Attachments go to the AI Task as local media source items with their type."""
+    async with _start_provider([_state("ai_task.first", "First")]) as (provider, hass):
+        await provider.ai_query(
+            "What style is this jingle?",
+            attachments=[
+                AIAttachment(path="/media/ai_radio/jingles/Mika Nacht.mp3"),
+                AIAttachment(path="/media/ai_radio/bed.ogg", mime_type="audio/ogg"),
+            ],
+        )
+
+        service_data = hass.send_command.call_args.kwargs["service_data"]
+        assert service_data["attachments"] == [
+            {
+                "media_content_id": "media-source://media_source/local/ai_radio/jingles/Mika Nacht.mp3",
+                "media_content_type": "audio/mpeg",
+            },
+            {
+                "media_content_id": "media-source://media_source/local/ai_radio/bed.ogg",
+                "media_content_type": "audio/ogg",
+            },
+        ]
+
+
+async def test_ai_query_without_attachments_sends_none() -> None:
+    """A plain query carries no attachments key, as before."""
+    async with _start_provider([_state("ai_task.first", "First")]) as (provider, hass):
+        await provider.ai_query("What is this song?", attachments=[])
+
+        assert "attachments" not in hass.send_command.call_args.kwargs["service_data"]
+
+
+async def test_ai_query_rejects_a_file_home_assistant_cannot_reach() -> None:
+    """A file outside the shared media folder is refused before anything is sent."""
+    async with _start_provider([_state("ai_task.first", "First")]) as (provider, hass):
+        calls_before = hass.send_command.await_count
+
+        with pytest.raises(UnsupportedFeaturedException, match="shared media folder"):
+            await provider.ai_query("Listen", attachments=[AIAttachment(path="/data/x.mp3")])
+
+        assert hass.send_command.await_count == calls_before
 
 
 async def test_ai_query_not_advertised_without_entity() -> None:
