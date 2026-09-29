@@ -609,7 +609,10 @@ class AIRadioRenderMixin:
             self._last_jingles_by_host()[host_id] = jingle["source"]
         if closer:
             self._last_after_jingles_by_host()[host_id] = time.monotonic()
-        return strip_jingle_words(text, [item for item in (jingle, closer) if item])
+        # the listeners know every jingle of the station, and the LLM saw the words of all it
+        # was offered, so no jingle's words are read out, played now or not
+        library = (self._hosts.get(host_id) or {}).get("effects", {}).get("jingles") or []
+        return strip_jingle_words(text, library)
 
     @staticmethod
     def _jingle_occasion_of(queue_item: QueueItem, news: bool, prompt: str) -> str:
