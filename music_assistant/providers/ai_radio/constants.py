@@ -232,8 +232,9 @@ JINGLE_AFTER_ALWAYS_INSTRUCTION = (
 )
 JINGLE_AFTER_ONSET_HINT = " The next song's vocals start after {seconds:.0f}s."
 JINGLE_CHOICE_CLOSING = (
-    "Pick by time of day, the music around and the words. The listeners hear the jingles "
-    "themselves, so never say, quote or paraphrase their words. Then the script."
+    "Pick by time of day, the music around and the words. The listeners know every "
+    "jingle, so never say, quote or paraphrase the words of any of them in the script, "
+    "not even of ones you do not pick. Then the script."
 )
 # a jingle phrase this short is too common to take out of a script, like "erste Platte"
 MIN_ECHOED_PHRASE_WORDS = 3
