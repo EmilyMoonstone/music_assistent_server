@@ -46,7 +46,13 @@ from music_assistant.helpers.datetime import iso_from_utc_timestamp
 from music_assistant.helpers.json import SerializableType
 from music_assistant.helpers.tts import TTSLanguageNotSupportedError
 from music_assistant.helpers.util import lock, try_parse_int
-from music_assistant.models.plugin import AIEngine, PluginProvider, TTSEngine
+from music_assistant.models.plugin import (
+    STT_SAMPLE_RATE,
+    AIEngine,
+    PluginProvider,
+    STTEngine,
+    TTSEngine,
+)
 
 from .constants import (
     CONF_MUTE_CONTROLS,
@@ -61,7 +67,12 @@ from .control_entities import (
     ControlEntitySearch,
     HassControlEntitySearchResult,
 )
-from .helpers import ControlCapabilities, get_control_name, is_entity_id
+from .helpers import (
+    ControlCapabilities,
+    get_control_name,
+    is_entity_id,
+    pick_stt_language,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -103,7 +114,7 @@ AREA_REGISTRY_CACHE_TTL = 60
 SEARCH_CONTROL_ENTITIES_COMMAND = f"{DOMAIN}/search_control_entities"
 
 # Home Assistant entity domains that back the TTS and AI Task features.
-FEATURE_DOMAINS = ("tts", "ai_task")
+FEATURE_DOMAINS = ("tts", "ai_task", "stt")
 FEATURE_DOMAIN_PREFIXES = tuple(f"{domain}." for domain in FEATURE_DOMAINS)
 
 # Entity registry fields a change to which can alter the mirrored registry. Beyond the
@@ -170,6 +181,7 @@ class HomeAssistantProvider(PluginProvider):
     _engine_refresh_task: asyncio.Task[None] | None = None
     _ai_engines: list[AIEngine]
     _tts_engines: list[TTSEngine]
+    _stt_engines: list[STTEngine]
     _startup_complete: bool = False
     _entity_registry: Mapping[str, HassRegistryEntity] | None = None
     _entity_registry_generation: int = 0
@@ -249,6 +261,7 @@ class HomeAssistantProvider(PluginProvider):
         self._control_reconcile_lock = asyncio.Lock()
         self._ai_engines = []
         self._tts_engines = []
+        self._stt_engines = []
         url = get_websocket_url(cast("str", self.get_setup_value(CONF_URL)))
         token = self.get_setup_value(CONF_AUTH_TOKEN)
         logging.getLogger("hass_client").setLevel(self.logger.level + 10)
@@ -616,6 +629,53 @@ class HomeAssistantProvider(PluginProvider):
     async def get_tts_engines(self) -> list[TTSEngine]:
         """Return the Home Assistant TTS entities as TTS engines."""
         return self._tts_engines
+
+    async def get_stt_engines(self) -> list[STTEngine]:
+        """Return the Home Assistant STT entities as speech-to-text engines."""
+        return self._stt_engines
+
+    async def speech_to_text(
+        self,
+        audio: bytes,
+        language: str | None = None,
+        engine_id: str | None = None,
+    ) -> str:
+        """Handle speech-to-text via Home Assistant's REST API."""
+        entity_id = engine_id or next((engine.id for engine in self._stt_engines), None)
+        if entity_id is None:
+            raise UnsupportedFeaturedException("STT entity is not available")
+        ha_url, headers, http_session = self._get_ha_http()
+        endpoint = f"{ha_url}/api/stt/{entity_id}"
+        # an engine answers a language it does not know with a bare 415, so it is matched
+        # against the ones the engine lists first
+        async with http_session.get(endpoint, headers=headers) as response:
+            if not response.ok:
+                raise MusicAssistantError(
+                    f"STT engine '{entity_id}' is unavailable: Home Assistant returned "
+                    f"HTTP {response.status} ({response.reason})."
+                )
+            supported = await response.json()
+        stt_language = pick_stt_language(language, supported.get("languages") or [])
+        if stt_language is None:
+            raise MusicAssistantError(
+                f"STT engine '{entity_id}' does not support the language '{language}'"
+            )
+        speech_content = (
+            f"format=wav; codec=pcm; sample_rate={STT_SAMPLE_RATE}; bit_rate=16; "
+            f"channel=1; language={stt_language}"
+        )
+        async with http_session.post(
+            endpoint, headers={**headers, "X-Speech-Content": speech_content}, data=audio
+        ) as response:
+            if not response.ok:
+                raise MusicAssistantError(
+                    f"STT request to engine '{entity_id}' failed: Home Assistant returned "
+                    f"HTTP {response.status} ({response.reason})."
+                )
+            result = await response.json()
+        if result.get("result") != "success":
+            raise MusicAssistantError(f"STT engine '{entity_id}' could not transcribe the audio")
+        return str(result.get("text") or "").strip()
 
     async def ai_query(self, query: str, engine_id: str | None = None) -> str:
         """Handle an AI query via Home Assistant's ai_task service."""
@@ -1058,9 +1118,10 @@ class HomeAssistantProvider(PluginProvider):
                 await asyncio.gather(feature_task, return_exceptions=True)
 
     async def _refresh_engines(self) -> None:
-        """Rebuild the TTS/AI engine lists from the Home Assistant feature entities."""
+        """Rebuild the TTS/AI/STT engine lists from the Home Assistant feature entities."""
         tts_engines: list[TTSEngine] = []
         ai_engines: list[AIEngine] = []
+        stt_engines: list[STTEngine] = []
         for state in await self.get_states(domains=FEATURE_DOMAINS):
             entity_id = state["entity_id"]
             entity_platform = entity_id.split(".", 1)[0]
@@ -1072,11 +1133,19 @@ class HomeAssistantProvider(PluginProvider):
                 tts_engines.append(TTSEngine(id=entity_id, name=name, provider=self))
             elif entity_platform == "ai_task":
                 ai_engines.append(AIEngine(id=entity_id, name=name, provider=self))
+            elif entity_platform == "stt":
+                stt_engines.append(STTEngine(id=entity_id, name=name, provider=self))
         tts_engines.sort(key=lambda engine: engine.name)
         ai_engines.sort(key=lambda engine: engine.name)
-        changed = (self._tts_engines, self._ai_engines) != (tts_engines, ai_engines)
+        stt_engines.sort(key=lambda engine: engine.name)
+        changed = (self._tts_engines, self._ai_engines, self._stt_engines) != (
+            tts_engines,
+            ai_engines,
+            stt_engines,
+        )
         self._tts_engines = tts_engines
         self._ai_engines = ai_engines
+        self._stt_engines = stt_engines
         self._supported_features.discard(ProviderFeature.TTS)
         self._supported_features.discard(ProviderFeature.AI_QUERY)
         if tts_engines:

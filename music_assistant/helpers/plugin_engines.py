@@ -1,4 +1,4 @@
-"""Helpers to discover, select and configure the AI/TTS engines exposed by plugins."""
+"""Helpers to discover, select and configure the AI/TTS/STT engines exposed by plugins."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from music_assistant.models.plugin import (
     AIEngine,
     PluginEngine,
     PluginProvider,
+    STTEngine,
     TTSEngine,
 )
 
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from music_assistant_models.config_entries import ConfigValueType
 
     from music_assistant.mass import MusicAssistant
+    from music_assistant.models import ProviderInstanceType
     from music_assistant.models.provider import Provider
 
 LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.helpers.plugin_engines")
@@ -46,6 +48,26 @@ async def get_tts_engines(mass: MusicAssistant) -> list[TTSEngine]:
     """
     return await _collect_engines(
         mass, ProviderFeature.TTS, lambda provider: provider.get_tts_engines()
+    )
+
+
+async def get_stt_engines(mass: MusicAssistant) -> list[STTEngine]:
+    """
+    Return all speech-to-text engines currently exposed by the loaded plugins, in a stable order.
+
+    There is no provider feature for speech-to-text, so every available plugin is asked.
+
+    :param mass: The Music Assistant instance to query.
+    """
+    plugins = [
+        provider
+        for provider in mass.providers
+        if provider.available and provider.type == ProviderType.PLUGIN
+    ]
+    return await _engines_of(
+        sorted(plugins, key=lambda provider: getattr(provider, "priority", 50)),
+        "speech-to-text",
+        lambda provider: provider.get_stt_engines(),
     )
 
 
@@ -79,6 +101,17 @@ async def resolve_tts_engine(mass: MusicAssistant, selected: str | None) -> TTSE
         an engine that no longer exists - another engine is never substituted for it.
     """
     return _resolve(await get_tts_engines(mass), selected)
+
+
+async def resolve_stt_engine(mass: MusicAssistant, selected: str | None) -> STTEngine | None:
+    """
+    Return the speech-to-text engine for a configured selection.
+
+    :param mass: The Music Assistant instance to query.
+    :param selected: The configured engine uid. Returns None when it is empty/unset or names
+        an engine that no longer exists - another engine is never substituted for it.
+    """
+    return _resolve(await get_stt_engines(mass), selected)
 
 
 async def select_ai_engine(
@@ -204,8 +237,21 @@ async def _collect_engines[EngineT: PluginEngine](
     fetch: Callable[[PluginProvider], Coroutine[Any, Any, list[EngineT]]],
 ) -> list[EngineT]:
     """Collect the engines of every available plugin declaring the given feature."""
+    return await _engines_of(
+        mass.get_providers_supporting_feature(feature, priority=(ProviderType.PLUGIN,)),
+        feature,
+        fetch,
+    )
+
+
+async def _engines_of[EngineT: PluginEngine](
+    providers: list[ProviderInstanceType],
+    kind: str,
+    fetch: Callable[[PluginProvider], Coroutine[Any, Any, list[EngineT]]],
+) -> list[EngineT]:
+    """Collect the engines of the given plugins, keeping the plugins' order."""
     result: list[EngineT] = []
-    for provider in mass.get_providers_supporting_feature(feature, priority=(ProviderType.PLUGIN,)):
+    for provider in providers:
         if not isinstance(provider, PluginProvider):
             continue
         try:
@@ -213,7 +259,7 @@ async def _collect_engines[EngineT: PluginEngine](
         except Exception as err:
             LOGGER.warning(
                 "Could not retrieve %s engines from %s: %s",
-                feature,
+                kind,
                 provider.instance_id,
                 err,
             )
