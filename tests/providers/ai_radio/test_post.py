@@ -217,6 +217,17 @@ async def test_break_closed_by_a_jingle_does_not_post(staged: Path) -> None:
     assert await _voice_over(renderer, track) is None
 
 
+async def test_a_post_that_fits_goes_before_a_closing_jingle(staged: Path) -> None:
+    """A break set to post over a real intro is not offered a closer; others still are."""
+    clip, track = _break_item(), _track_item("song")
+    renderer = PostRenderer(staged, [clip, track])
+    assert renderer._post_fits(clip, 11.5) is True
+    # the vocal comes too soon for any intro to talk over, so a jingle may bridge in
+    assert renderer._post_fits(clip, 0.5) is False
+    assert renderer._post_fits(clip, None) is False
+    assert renderer._post_fits(_break_item(allow_post=False), 11.5) is False
+
+
 async def test_the_llm_learns_when_the_next_song_sings(staged: Path) -> None:
     """The vocal timing that places a post also tells whether a jingle should bridge in."""
     clip, track = _break_item(), _track_item("song")

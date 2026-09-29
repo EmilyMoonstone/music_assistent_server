@@ -467,11 +467,7 @@ class AIRadioRenderMixin:
             return None
         host = self._hosts.get(str(queue_item.extra_attributes.get(ATTR_HOST_ID) or "")) or {}
         host_effects: dict[str, Any] = host.get("effects") or {}
-        gap = coerce_float(host_effects.get("post_gap_seconds"), POST_TAIL_GAP)
-        window = onset - gap
-        # a cap keeps the host from talking over a long intro all the way to the vocal
-        if (max_overlap := coerce_float(host_effects.get("post_max_seconds"), 0.0)) > 0:
-            window = min(window, max_overlap)
+        window = self._post_window(queue_item, onset)
         if window < POST_MIN_SECONDS:
             self._post_skipped(
                 next_item.name, f"vocal enters at {onset:.1f}s, too little instrumental intro"
@@ -1119,7 +1115,24 @@ class AIRadioRenderMixin:
         :param queue_item: The clip to look at.
         :param vocal_onset: The second the next song starts singing, None when unknown.
         """
-        return False
+        if not queue_item.extra_attributes.get(ATTR_ALLOW_POST) or vocal_onset is None:
+            return False
+        return self._post_window(queue_item, vocal_onset) >= POST_MIN_SECONDS
+
+    def _post_window(self, queue_item: QueueItem, vocal_onset: float) -> float:
+        """
+        Return how long a break's tail may run over the next song's intro, as its host has it.
+
+        :param queue_item: The clip whose host to follow.
+        :param vocal_onset: The second the next song starts singing.
+        """
+        host = self._hosts.get(str(queue_item.extra_attributes.get(ATTR_HOST_ID) or "")) or {}
+        host_effects: dict[str, Any] = host.get("effects") or {}
+        window = vocal_onset - coerce_float(host_effects.get("post_gap_seconds"), POST_TAIL_GAP)
+        # a cap keeps the host from talking over a long intro all the way to the vocal
+        if (max_overlap := coerce_float(host_effects.get("post_max_seconds"), 0.0)) > 0:
+            window = min(window, max_overlap)
+        return window
 
     def _next_track_genres(self, queue_item: QueueItem) -> set[str]:
         """Return the lowercase genres of the track after a clip, empty when unknown."""
