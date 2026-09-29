@@ -23,6 +23,7 @@ from music_assistant.helpers.plugin_engines import (
     select_ai_engine,
     select_tts_engine,
 )
+from music_assistant.helpers.stt import transcribe
 from music_assistant.helpers.tags import async_parse_tags
 from music_assistant.models.plugin import PluginProvider
 
@@ -44,7 +45,7 @@ from .constants import (
     SUPPORTED_FEATURES,
     TRANSLATION_OWNER,
 )
-from .effects import is_valid_source, jingle_text_from_lyrics, resolve_source
+from .effects import is_valid_source, jingle_text, jingle_text_from_lyrics, resolve_source
 from .helpers import check_player_access, has_player_access, utc_now_iso
 from .hosts import AIRadioHostsMixin
 from .memory import AIRadioMemoryMixin
@@ -390,23 +391,38 @@ class AIRadioProvider(
             await self.clear_break_memory(host_id)
         self.logger.info("AI Radio host deleted: %s", host_id)
 
-    async def inspect_jingle(self, source: str) -> dict[str, Any]:
+    async def inspect_jingle(
+        self, source: str, transcribe_speech: bool = False, language: str | None = None
+    ) -> dict[str, Any]:
         """
         Return what a jingle carries: how long it runs, its title and the words it says.
 
-        The words come from the file's lyrics tag, which tools like Suno fill in.
+        The words come from the file's lyrics tag, which tools like Suno fill in. A file
+        without them can be listened to by a speech-to-text engine instead.
 
         :param source: The built-in gong, or the file path or URL of the jingle.
+        :param transcribe_speech: Listen for the words when the lyrics tag has none.
+        :param language: The language the jingle speaks, the host's or else the server's.
         """
         source = source.strip()
         if source != EFFECT_BUILTIN_JINGLE and not is_valid_source(source):
             raise InvalidDataError("A jingle must be an absolute file path or an http(s) URL")
         async with asyncio.timeout(LOUDNESS_MEASURE_TIMEOUT):
             tags = await async_parse_tags(resolve_source(source), require_duration=True)
+        text = jingle_text_from_lyrics(tags.lyrics)
+        text_source = "tags" if text else ""
+        # the gong says nothing, so it is never sent off to be listened to
+        if not text and transcribe_speech and source != EFFECT_BUILTIN_JINGLE:
+            heard = await transcribe(
+                self.mass, source, self._tts_language(language), logger=self.logger
+            )
+            if text := jingle_text(heard):
+                text_source = "speech"
         return {
             "duration": tags.duration,
             "title": tags.title or "",
-            "text": jingle_text_from_lyrics(tags.lyrics),
+            "text": text,
+            "text_source": text_source,
         }
 
     async def browse_jingles(self, path: str | None = None) -> dict[str, Any]:

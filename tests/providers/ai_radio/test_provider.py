@@ -16,6 +16,7 @@ from music_assistant_models.enums import EventType, PlaybackState, ProviderFeatu
 from music_assistant_models.errors import (
     InsufficientPermissions,
     InvalidDataError,
+    MusicAssistantError,
     PlayerUnavailableError,
     SetupFailedError,
 )
@@ -433,9 +434,76 @@ async def test_inspecting_a_jingle_reads_its_words_from_the_lyrics(
         "duration": 9.29,
         "title": "Keine Floskeln",
         "text": "Keine Floskeln. Mika am Mikro.",
+        "text_source": "tags",
     }
     with pytest.raises(InvalidDataError):
         await provider.inspect_jingle("floskeln.mp3")
+
+
+def _untagged_jingle(
+    provider: Any, monkeypatch: pytest.MonkeyPatch, heard: str | Exception
+) -> list[Any]:
+    """Let a jingle carry no lyrics tag and a speech engine hear the given words."""
+    provider.mass = MagicMock()
+
+    async def fake_parse_tags(_path: str, **_kwargs: Any) -> Any:
+        return SimpleNamespace(duration=6.0, title="Station ID", lyrics=None)
+
+    calls: list[Any] = []
+
+    async def fake_transcribe(_mass: Any, source: str, language: str | None, **_kwargs: Any) -> str:
+        calls.append((source, language))
+        if isinstance(heard, Exception):
+            raise heard
+        return heard
+
+    monkeypatch.setattr(ai_radio_provider, "async_parse_tags", fake_parse_tags)
+    monkeypatch.setattr(ai_radio_provider, "transcribe", fake_transcribe)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_inspecting_a_jingle_without_lyrics_listens_for_its_words(
+    provider: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asked to, a jingle without a lyrics tag is transcribed in the host's language."""
+    calls = _untagged_jingle(provider, monkeypatch, "  Das Radio   für Musikentdecker \n mit Mika ")
+
+    info = await provider.inspect_jingle(
+        "/media/ai_radio/id.mp3", transcribe_speech=True, language="de_DE"
+    )
+
+    assert info["text"] == "Das Radio für Musikentdecker mit Mika"
+    assert info["text_source"] == "speech"
+    assert calls == [("/media/ai_radio/id.mp3", "de-DE")]
+
+
+@pytest.mark.asyncio
+async def test_inspecting_a_jingle_only_listens_when_asked(
+    provider: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the request, and for the built-in gong, nothing is sent to an engine."""
+    calls = _untagged_jingle(provider, monkeypatch, "unused")
+
+    info = await provider.inspect_jingle("/media/ai_radio/id.mp3")
+    gong = await provider.inspect_jingle("builtin", transcribe_speech=True)
+
+    assert (info["text"], info["text_source"]) == ("", "")
+    assert (gong["text"], gong["text_source"]) == ("", "")
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_inspecting_a_jingle_reports_a_failed_transcription(
+    provider: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When no engine could listen, the reason reaches the caller."""
+    _untagged_jingle(
+        provider, monkeypatch, MusicAssistantError("Every speech-to-text engine failed")
+    )
+
+    with pytest.raises(MusicAssistantError, match="Every speech-to-text engine failed"):
+        await provider.inspect_jingle("/media/ai_radio/id.mp3", transcribe_speech=True)
 
 
 @pytest.fixture

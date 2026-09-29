@@ -239,7 +239,12 @@ def jingle_text_from_lyrics(lyrics: str | None) -> str:
     """Return the words of a jingle from its lyrics tag, without cue marks like [Spoken]."""
     if not lyrics:
         return ""
-    return " ".join(re.sub(r"\[[^\]]*\]", " ", lyrics).split())[:MAX_JINGLE_TEXT_CHARS]
+    return jingle_text(re.sub(r"\[[^\]]*\]", " ", lyrics))
+
+
+def jingle_text(words: str) -> str:
+    """Return the words of a jingle on one line, cut to the length the library keeps."""
+    return " ".join(words.split())[:MAX_JINGLE_TEXT_CHARS]
 
 
 def resolve_source(source: str) -> str:
