@@ -1382,3 +1382,40 @@ async def test_status_only_shows_the_runs_on_players_the_user_has_access_to() ->
     for hidden in ("s_living", "s_group"):
         with pytest.raises(KeyError):
             await provider.get_status(session_id=hidden)
+
+
+@pytest.mark.asyncio
+async def test_analysing_a_jingle_lets_the_ai_listen_to_the_file(provider: Any) -> None:
+    """The file goes along as an attachment and the answer comes back in library form."""
+    provider.mass = MagicMock()
+    plugin = MagicMock()
+    plugin.ai_query = AsyncMock(
+        return_value='{"tags": ["intro", "Upbeat"], "text": "Mika!", "style": "Hell und laut."}'
+    )
+    engine = SimpleNamespace(id="ai_task.google", uid="hass/ai_task.google", provider=plugin)
+    provider._get_ai_engine = AsyncMock(return_value=engine)
+
+    analysis = await provider.analyze_jingle(" /media/ai_radio/mika.mp3 ", language="de_DE")
+
+    assert analysis == {"tags": ["intro", "upbeat"], "text": "Mika!", "style": "Hell und laut."}
+    call = plugin.ai_query.await_args
+    assert "'de-DE'" in call.args[0]
+    assert call.kwargs["engine_id"] == "ai_task.google"
+    assert [attachment.path for attachment in call.kwargs["attachments"]] == [
+        "/media/ai_radio/mika.mp3"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_analysing_a_jingle_reports_why_the_ai_could_not(provider: Any) -> None:
+    """The gong is not analysed, and an engine that fails says which one it was."""
+    provider.mass = MagicMock()
+    plugin = MagicMock()
+    plugin.ai_query = AsyncMock(side_effect=RuntimeError("attachments not supported"))
+    engine = SimpleNamespace(id="ai_task.x", uid="hass/ai_task.x", provider=plugin)
+    provider._get_ai_engine = AsyncMock(return_value=engine)
+
+    with pytest.raises(InvalidDataError):
+        await provider.analyze_jingle("builtin")
+    with pytest.raises(MusicAssistantError, match=r"hass/ai_task\.x.*attachments not supported"):
+        await provider.analyze_jingle("/media/ai_radio/mika.mp3", language="de")

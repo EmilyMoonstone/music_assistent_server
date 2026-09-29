@@ -28,12 +28,14 @@ from music_assistant.providers.ai_radio.effects import (
     default_effects,
     dressed_duration,
     effect_filters,
+    jingle_analysis_prompt,
     jingle_candidates,
     jingle_choice_prompt,
     jingle_occasion,
     jingle_text_from_lyrics,
     merge_jingle_modes,
     normalize_effects,
+    parse_jingle_analysis,
     pick_jingle,
     resolve_source,
     take_jingle_choices,
@@ -557,3 +559,36 @@ def test_opening_and_closing_jingles_build_one_filtergraph() -> None:
     assert args.count("-i") == 4
     order = ["duration=first", "adelay", "duration=longest", "acrossfade"]
     assert [graph.index(step) for step in order] == sorted(graph.index(step) for step in order)
+
+
+def test_the_analysis_prompt_names_the_tags_and_the_language() -> None:
+    """The AI is told which tags the station acts on and what language to describe in."""
+    prompt = jingle_analysis_prompt("de-DE")
+
+    assert "general, news, weather, intro, outro" in prompt
+    assert "morning, daytime, evening, late_night" in prompt
+    assert "'de-DE'" in prompt
+    assert '{"tags": [], "text": "", "style": ""}' in prompt
+
+
+def test_an_analysis_is_read_into_library_form() -> None:
+    """Tags are normalized and deduplicated, style tags capped, words flattened."""
+    reply = """```json
+    {"tags": ["Late Night", "general", "Indie Pop", "calm", "dreamy", "lo-fi", "warm", "calm"],
+     "text": "Das Radio  für\\nMusikentdecker", "style": "Ruhiger Indie-Pop mit Synths."}
+    ```"""
+
+    analysis = parse_jingle_analysis(reply)
+
+    assert analysis == {
+        "tags": ["late_night", "general", "indie_pop", "calm", "dreamy", "lo-fi"],
+        "text": "Das Radio für Musikentdecker",
+        "style": "Ruhiger Indie-Pop mit Synths.",
+    }
+
+
+@pytest.mark.parametrize("reply", ["", "I cannot hear audio.", "[1, 2]", "{not json}"])
+def test_an_answer_without_a_description_is_an_error(reply: str) -> None:
+    """Anything but a JSON object is reported instead of filing nothing."""
+    with pytest.raises(InvalidDataError, match="did not answer"):
+        parse_jingle_analysis(reply)

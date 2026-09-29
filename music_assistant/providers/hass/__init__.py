@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 import os
 from functools import partial
 from itertools import batched
@@ -48,6 +49,7 @@ from music_assistant.helpers.tts import TTSLanguageNotSupportedError
 from music_assistant.helpers.util import lock, try_parse_int
 from music_assistant.models.plugin import (
     STT_SAMPLE_RATE,
+    AIAttachment,
     AIEngine,
     PluginProvider,
     STTEngine,
@@ -71,11 +73,12 @@ from .helpers import (
     ControlCapabilities,
     get_control_name,
     is_entity_id,
+    media_source_id,
     pick_stt_language,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Callable, Collection, Mapping, Sequence
 
     from aiohttp import ClientResponse, ClientSession
     from hass_client.models import (
@@ -677,20 +680,28 @@ class HomeAssistantProvider(PluginProvider):
             raise MusicAssistantError(f"STT engine '{entity_id}' could not transcribe the audio")
         return str(result.get("text") or "").strip()
 
-    async def ai_query(self, query: str, engine_id: str | None = None) -> str:
+    async def ai_query(
+        self,
+        query: str,
+        engine_id: str | None = None,
+        attachments: Sequence[AIAttachment] | None = None,
+    ) -> str:
         """Handle an AI query via Home Assistant's ai_task service."""
         entity_id = engine_id or next((engine.id for engine in self._ai_engines), None)
         if entity_id is None:
             raise UnsupportedFeaturedException("AI Task entity is not available")
+        service_data: dict[str, Any] = {
+            "task_name": "music_assistant",
+            "instructions": query,
+            "entity_id": entity_id,
+        }
+        if attachments:
+            service_data["attachments"] = [_ai_task_attachment(item) for item in attachments]
         result = await self.hass.send_command(
             "call_service",
             domain="ai_task",
             service="generate_data",
-            service_data={
-                "task_name": "music_assistant",
-                "instructions": query,
-                "entity_id": entity_id,
-            },
+            service_data=service_data,
             return_response=True,
         )
         response = result.get("response", {}) if isinstance(result, dict) else {}
@@ -1295,4 +1306,24 @@ def _decompress_state(entity_id: str, compressed_state: CompressedState) -> Stat
         "last_changed": iso_from_utc_timestamp(last_changed) if last_changed else "",
         "last_updated": iso_from_utc_timestamp(last_updated) if last_updated else "",
         "context": context,
+    }
+
+
+def _ai_task_attachment(attachment: AIAttachment) -> dict[str, str]:
+    """
+    Return an attachment as Home Assistant's ai_task takes it: a media source item.
+
+    Home Assistant reads the file itself, so it has to be one it can reach, a file in the
+    media folder it shares with Music Assistant.
+    """
+    if (content_id := media_source_id(attachment.path)) is None:
+        msg = (
+            f"Home Assistant cannot read {attachment.path}: only files in the shared media "
+            "folder can be handed to an AI Task"
+        )
+        raise UnsupportedFeaturedException(msg)
+    mime_type = attachment.mime_type or mimetypes.guess_type(attachment.path)[0]
+    return {
+        "media_content_id": content_id,
+        "media_content_type": mime_type or "application/octet-stream",
     }

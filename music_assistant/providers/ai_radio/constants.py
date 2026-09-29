@@ -248,6 +248,19 @@ JINGLE_AFTER_GAP_RANGE = (0, 240)
 # a song singing this soon after it starts leaves no intro to talk over, so a jingle
 # bridges into it instead
 JINGLE_AFTER_EARLY_VOCAL_SECONDS = 3.0
+# the AI listens to a jingle once when it is filed, and suggests how to tag it
+JINGLE_ANALYSIS_PROMPT = (
+    "Listen to the attached radio jingle and file it for a radio automation. Reply with "
+    'JSON only, no prose: {{"tags": [], "text": "", "style": ""}}. '
+    "tags: any of {occasions} the jingle suits (general for a plain station ident), any of "
+    "{times} it suits by its mood, plus up to {style_tags} short lowercase English style "
+    "tags for genre, mood and energy, like indie, calm or upbeat. "
+    "text: the words it sings or speaks, in their own language, empty if there are none. "
+    "style: one short sentence on its sound and mood, in the language of the locale "
+    "'{language}'."
+)
+JINGLE_ANALYSIS_STYLE_TAGS = 4
+MAX_JINGLE_STYLE_CHARS = 200
 # what a jingle says is cut to this in the prompt: enough to pick by, few tokens
 JINGLE_PROMPT_TEXT_CHARS = 120
 # the LLM that writes a break also picks its jingles, answering on lines of their own

@@ -15,6 +15,7 @@ from music_assistant_models.auth import Scope
 from music_assistant_models.enums import EventType
 from music_assistant_models.errors import (
     InvalidDataError,
+    MusicAssistantError,
     SetupFailedError,
 )
 
@@ -25,9 +26,10 @@ from music_assistant.helpers.plugin_engines import (
 )
 from music_assistant.helpers.stt import transcribe
 from music_assistant.helpers.tags import async_parse_tags
-from music_assistant.models.plugin import PluginProvider
+from music_assistant.models.plugin import AIAttachment, PluginProvider
 
 from .constants import (
+    AI_QUERY_TIMEOUT_SECONDS,
     CONF_AI_ENGINE,
     CONF_TTS_ENGINE,
     DEFAULT_MAX_CONCURRENT_RUNS,
@@ -45,7 +47,14 @@ from .constants import (
     SUPPORTED_FEATURES,
     TRANSLATION_OWNER,
 )
-from .effects import is_valid_source, jingle_text, jingle_text_from_lyrics, resolve_source
+from .effects import (
+    is_valid_source,
+    jingle_analysis_prompt,
+    jingle_text,
+    jingle_text_from_lyrics,
+    parse_jingle_analysis,
+    resolve_source,
+)
 from .helpers import check_player_access, has_player_access, utc_now_iso
 from .hosts import AIRadioHostsMixin
 from .memory import AIRadioMemoryMixin
@@ -163,6 +172,7 @@ class AIRadioProvider(
             ("ai_radio/memory/get", self.get_break_memory),
             ("ai_radio/memory/clear", self.clear_break_memory),
             ("ai_radio/jingles/inspect", self.inspect_jingle),
+            ("ai_radio/jingles/analyze", self.analyze_jingle),
             ("ai_radio/jingles/browse", self.browse_jingles),
             ("ai_radio/jingles/preview", self.preview_jingle),
             ("ai_radio/start", self.start_run),
@@ -424,6 +434,39 @@ class AIRadioProvider(
             "text": text,
             "text_source": text_source,
         }
+
+    async def analyze_jingle(self, source: str, language: str | None = None) -> dict[str, Any]:
+        """
+        Let the AI listen to a jingle and suggest how to file it: tags, its words and its style.
+
+        Runs once when a jingle is filed, not on air, so it costs one request per jingle.
+
+        :param source: The file path of the jingle, in the media folder the AI engine can read.
+        :param language: The locale the style note is written for, the host's or the server's.
+        """
+        source = source.strip()
+        if source == EFFECT_BUILTIN_JINGLE or not source.startswith("/"):
+            raise InvalidDataError("Only a jingle file in the media folder can be analysed")
+        engine = await self._get_ai_engine()
+        prompt = jingle_analysis_prompt(self._tts_language(language) or self.mass.metadata.locale)
+        try:
+            async with asyncio.timeout(AI_QUERY_TIMEOUT_SECONDS):
+                reply = await engine.provider.ai_query(
+                    prompt, engine_id=engine.id, attachments=[AIAttachment(path=source)]
+                )
+        except TimeoutError as err:
+            raise MusicAssistantError(
+                f"AI engine '{engine.uid}' did not listen to the jingle within "
+                f"{AI_QUERY_TIMEOUT_SECONDS}s"
+            ) from err
+        except MusicAssistantError:
+            raise
+        except Exception as err:
+            raise MusicAssistantError(
+                f"AI engine '{engine.uid}' could not analyse the jingle: {err}"
+            ) from err
+        self.logger.debug("AI Radio jingle %s analysed: %s", source, reply)
+        return parse_jingle_analysis(str(reply or ""))
 
     async def browse_jingles(self, path: str | None = None) -> dict[str, Any]:
         """

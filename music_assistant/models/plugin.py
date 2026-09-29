@@ -112,6 +112,18 @@ class LeadIn:
     fade_in: bool = True
 
 
+@dataclass(kw_only=True)
+class AIAttachment:
+    """
+    A file handed to an AI query next to its prompt, like a sound for the model to listen to.
+
+    Server-side only: never serialized to clients.
+    """
+
+    path: str  # absolute path of a local file
+    mime_type: str | None = None  # guessed from the file name when None
+
+
 class PluginProvider(Provider):
     """
     Base representation of a Plugin for Music Assistant.
@@ -481,7 +493,12 @@ class PluginProvider(Provider):
             raise NotImplementedError
         return []
 
-    async def ai_query(self, query: str, engine_id: str | None = None) -> str:
+    async def ai_query(
+        self,
+        query: str,
+        engine_id: str | None = None,
+        attachments: Sequence[AIAttachment] | None = None,
+    ) -> str:
         """
         Handle an AI query.
 
@@ -490,6 +507,10 @@ class PluginProvider(Provider):
         :param query: The query/prompt to send.
         :param engine_id: The provider-scoped id of the engine to use (``AIEngine.id``,
             not its ``uid``). Omit or pass None to use the plugin's own default engine.
+        :param attachments: Files for the model to take in next to the prompt. Callers only
+            pass this when they have files, so a plugin that predates it keeps working for
+            plain queries; a plugin that cannot hand files to its engine raises
+            UnsupportedFeaturedException.
         :return: The AI response as a string.
         """
         raise NotImplementedError

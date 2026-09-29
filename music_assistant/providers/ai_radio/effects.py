@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import re
@@ -28,6 +29,8 @@ from .constants import (
     JINGLE_AFTER_EARLY_VOCAL_SECONDS,
     JINGLE_AFTER_GAP_RANGE,
     JINGLE_AFTER_ONSET_HINT,
+    JINGLE_ANALYSIS_PROMPT,
+    JINGLE_ANALYSIS_STYLE_TAGS,
     JINGLE_BEFORE_INSTRUCTION,
     JINGLE_CHOICE_CLOSING,
     JINGLE_LIST_HEADER,
@@ -39,6 +42,7 @@ from .constants import (
     JINGLE_VOICE_OVERLAP_SECONDS,
     LEAD_IN_MODES,
     LEAD_IN_SECONDS_RANGE,
+    MAX_JINGLE_STYLE_CHARS,
     MAX_JINGLE_TEXT_CHARS,
     MAX_JINGLES,
     MUSIC_BED_FADE_IN_SECONDS,
@@ -404,6 +408,58 @@ def jingle_text_from_lyrics(lyrics: str | None) -> str:
 def jingle_text(words: str) -> str:
     """Return the words of a jingle on one line, cut to the length the library keeps."""
     return " ".join(words.split())[:MAX_JINGLE_TEXT_CHARS]
+
+
+def jingle_analysis_prompt(language: str) -> str:
+    """
+    Return the prompt asking the AI to listen to a jingle and suggest how to file it.
+
+    :param language: The locale the style note is written for, like de-DE.
+    """
+    return JINGLE_ANALYSIS_PROMPT.format(
+        occasions=", ".join(JINGLE_OCCASION_TAGS),
+        times=", ".join(JINGLE_TIME_TAGS),
+        style_tags=JINGLE_ANALYSIS_STYLE_TAGS,
+        language=language,
+    )
+
+
+def parse_jingle_analysis(reply: str) -> dict[str, Any]:
+    """
+    Return the tags, words and style note the AI suggested for a jingle.
+
+    Tags come back in the form the library stores; the occasion and time tags it knows are
+    kept, other tags only up to the few style tags asked for.
+
+    :param reply: The AI's answer, expected to hold a JSON object.
+    :raises InvalidDataError: When the answer holds no JSON object.
+    """
+    start, end = reply.find("{"), reply.rfind("}")
+    try:
+        data = json.loads(reply[start : end + 1]) if 0 <= start < end else None
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        raise InvalidDataError("The AI did not answer with a description of the jingle")
+    known = set(JINGLE_OCCASION_TAGS) | set(JINGLE_TIME_TAGS)
+    tags: list[str] = []
+    style_tags = 0
+    raw_tags = data.get("tags")
+    for raw_tag in raw_tags if isinstance(raw_tags, list) else []:
+        tag = "_".join(str(raw_tag).lower().split())
+        if not tag or tag in tags:
+            continue
+        if tag not in known:
+            if style_tags >= JINGLE_ANALYSIS_STYLE_TAGS:
+                continue
+            style_tags += 1
+        tags.append(tag)
+    style = " ".join(str(data.get("style") or "").split())
+    return {
+        "tags": tags,
+        "text": jingle_text(str(data.get("text") or "")),
+        "style": style[:MAX_JINGLE_STYLE_CHARS],
+    }
 
 
 def resolve_source(source: str) -> str:

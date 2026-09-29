@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, NamedTuple
 
 from .constants import MediaPlayerEntityFeature, parse_supported_features
@@ -14,6 +15,10 @@ if TYPE_CHECKING:
 
 # Home Assistant entity IDs are a domain and an object ID, both lowercase, joined by a dot
 ENTITY_ID_PATTERN = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
+# the media folder Music Assistant shares with Home Assistant as an app, which Home Assistant
+# serves as its "local" media source
+HA_MEDIA_ROOT = PurePosixPath("/media")
+HA_LOCAL_MEDIA_SOURCE = "media-source://media_source/local"
 
 
 class ControlCapabilities(NamedTuple):
@@ -22,6 +27,23 @@ class ControlCapabilities(NamedTuple):
     power: bool = False
     volume: bool = False
     mute: bool = False
+
+
+def media_source_id(path: str) -> str | None:
+    """
+    Return the Home Assistant media source id of a file in the shared media folder.
+
+    :param path: The absolute path of the file, as Music Assistant sees it.
+    :return: The media source id, or None when the file is outside the media folder, so
+        Home Assistant cannot reach it.
+    """
+    file = PurePosixPath(path)
+    if not file.is_absolute() or ".." in file.parts or not file.is_relative_to(HA_MEDIA_ROOT):
+        return None
+    relative = file.relative_to(HA_MEDIA_ROOT)
+    if not relative.parts:
+        return None
+    return f"{HA_LOCAL_MEDIA_SOURCE}/{relative.as_posix()}"
 
 
 def is_entity_id(value: str) -> bool:
