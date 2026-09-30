@@ -784,3 +784,23 @@ async def test_a_host_without_post_options_keeps_the_defaults(staged: Path) -> N
     assert voice_over is not None
     assert voice_over.end == pytest.approx(_OVERLAP)
     assert voice_over.duck_depth == pytest.approx(0.6)
+
+
+async def test_the_log_tells_whether_the_break_posted(staged: Path) -> None:
+    """An armed post is logged with its overlap, a skipped one with its reason and timing."""
+    clip, track = _break_item(), _track_item("song")
+    renderer = PostRenderer(staged, [clip, track])
+    await renderer._plan_post(clip, _MEDIA, _CLIP_ID, gain_db=-2.0)
+
+    early_clip, early_track = _break_item(), _track_item("song")
+    early = PostRenderer(staged, [early_clip, early_track])
+    early.onset = 0.5
+    await early._plan_post(early_clip, _MEDIA, _CLIP_ID, gain_db=-2.0)
+
+    [armed] = await renderer.get_break_log()
+    [skipped] = await early.get_break_log()
+    assert armed["into_song"] == {"kind": "post", "seconds": pytest.approx(_OVERLAP)}
+    assert skipped["into_song"] == {
+        "kind": "direct",
+        "reason": {"code": "early_vocal", "seconds": 0.5},
+    }

@@ -366,7 +366,7 @@ def test_the_lead_in_is_kept_to_known_modes_and_a_sane_length() -> None:
     low, high = LEAD_IN_SECONDS_RANGE
 
     assert default_effects()["lead_in"] == "cut"
-    assert normalize_effects({"lead_in": "talk_up", "lead_in_seconds": 4})["lead_in"] == "talk_up"
+    assert normalize_effects({"lead_in": "talk_up", "lead_in_seconds": 4})["lead_in"] == "crossfade"
     assert normalize_effects({"lead_in": "wobble"})["lead_in"] == "cut"
     assert normalize_effects({"lead_in_seconds": 30})["lead_in_seconds"] == high
     assert normalize_effects({"lead_in_seconds": 0})["lead_in_seconds"] == low

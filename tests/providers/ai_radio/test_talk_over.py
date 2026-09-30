@@ -263,3 +263,60 @@ def test_a_held_back_bed_is_delayed_in_the_mix() -> None:
     bed_mix = effect_filters(effects, voice_seconds=20)[1]
 
     assert bed_mix.inputs[0].filters.endswith("afade=t=in:d=1.0,adelay=7500:all=1")
+
+
+async def test_the_log_tells_how_the_break_met_the_song_before_it() -> None:
+    """An armed talk-over is logged with its length, a skipped one with a reason code."""
+    renderer, clip = _renderer()
+    await renderer._plan_talk_over(clip, _CLIP_ID)
+
+    renderer_skipped, clip_skipped = _renderer()
+    renderer_skipped.vocal_end = None
+    await renderer_skipped._plan_talk_over(clip_skipped, _CLIP_ID)
+
+    [armed] = await renderer.get_break_log()
+    [skipped] = await renderer_skipped.get_break_log()
+    assert armed["from_song"] == {"kind": "talk_over", "seconds": pytest.approx(_TALK_OVER)}
+    assert armed["section"] == "Back announce"
+    assert skipped["from_song"] == {"kind": "cut", "reason": {"code": "no_lyrics"}}
+
+
+@pytest.mark.parametrize(
+    ("vocal_end", "kind", "seconds"),
+    [
+        pytest.param(None, "crossfade", 5.0, id="unknown singing keeps the crossfade"),
+        pytest.param(197.0, "crossfade", 2.6, id="shortened to the outro"),
+        pytest.param(199.5, "cut", 0.0, id="singing to the end leaves it out"),
+    ],
+)
+async def test_the_hosts_crossfade_never_reaches_into_the_singing(
+    vocal_end: float | None, kind: str, seconds: float
+) -> None:
+    """Without a talk-over the host's crossfade applies, but only over the outro."""
+    renderer, clip = _renderer(allow=False, lead_in="crossfade", lead_in_seconds=5)
+    renderer.vocal_end = vocal_end
+
+    plan = await renderer._plan_talk_over(clip, _CLIP_ID)
+
+    assert plan is not None
+    assert (plan.kind, plan.seconds) == (kind, pytest.approx(seconds))
+    assert not renderer._talk_over_fits(clip)
+    expected = LeadIn(seconds=pytest.approx(seconds)) if kind == "crossfade" else None
+    assert renderer.get_lead_in(_break_streamdetails()) == expected
+
+
+async def test_a_host_that_cuts_needs_no_lyrics() -> None:
+    """A host without a crossfade looks nothing up for a break that does not talk over."""
+    renderer, clip = _renderer(allow=False, lead_in="cut")
+
+    assert await renderer._plan_talk_over(clip, _CLIP_ID) is None
+    assert renderer.lookups == 0
+
+
+async def test_the_log_can_be_read_for_one_station() -> None:
+    """Breaks of other stations are left out when one is asked for."""
+    renderer, clip = _renderer()
+    await renderer._plan_talk_over(clip, _CLIP_ID)
+
+    assert await renderer.get_break_log(station_id="other") == []
+    assert len(await renderer.get_break_log()) == 1

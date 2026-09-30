@@ -12,7 +12,9 @@ import random
 import tempfile
 import time
 import wave
+from collections import OrderedDict
 from contextlib import aclosing
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -54,6 +56,7 @@ from music_assistant.helpers.tts import (
 )
 from music_assistant.models.plugin import LeadIn, VoiceOver
 
+from .break_log import lyrics_reason_code, new_break_entry, reason, trim_log
 from .constants import (
     ATTR_ALLOW_POST,
     ATTR_ALLOW_TALK_OVER,
@@ -69,6 +72,7 @@ from .constants import (
     ATTR_SLOT_WHEN,
     ATTR_WEATHER_REQUIRED,
     ATTR_WEB_SEARCH_MODE,
+    BREAK_LOG_SIZE,
     CLIP_COPY_FORMAT,
     CLIP_COPY_LIFETIME,
     CLIP_COPY_PREFIX,
@@ -84,6 +88,7 @@ from .constants import (
     DEFERRED_PLACEHOLDERS,
     EFFECT_MEASURE_SECONDS,
     JINGLE_VOICE_OVERLAP_SECONDS,
+    LEAD_IN_MIN_SECONDS,
     LOUDNESS_MEASURE_TIMEOUT,
     MIN_CLIP_COPY_BYTES,
     MIN_CLIP_MEDIA_LIFETIME,
@@ -136,6 +141,10 @@ if TYPE_CHECKING:
     from .models import SessionState
 
 
+# a break log entry as it starts, before anything about the break is known
+_INITIAL_BREAK = new_break_entry("", "", "", "", "")
+
+
 @dataclass(slots=True)
 class _CachedClipMedia:
     """Media previously minted for a clip, kept until it expires."""
@@ -170,12 +179,15 @@ class _PostPlan:
 
 @dataclass(slots=True)
 class _TalkOverPlan:
-    """How far a break starts over the outro of the record before it."""
+    """How the record before a break blends into it, decided with the record's singing."""
 
     seconds: float  # the stretch at the end of the record the break plays over
     track_item_id: str  # the record
     # fraction of the record's level removed under the break, as the host is set up to
     duck_depth: float | None = None
+    # "talk_over": the voice starts over the outro; "crossfade": the host's crossfade, kept
+    # off the singing; "cut": no overlap, the singing runs to the end
+    kind: str = "talk_over"
 
 
 @dataclass(slots=True)
@@ -240,6 +252,61 @@ class AIRadioRenderMixin:
     _effect_assets: dict[str, tuple[float, float]]
     _last_jingles: dict[str, str]
     _last_after_jingles: dict[str, float]
+    _break_log: OrderedDict[str, dict[str, Any]]
+
+    async def get_break_log(
+        self, station_id: str | None = None, limit: int = 30
+    ) -> list[dict[str, Any]]:
+        """
+        Return what happened around the latest breaks, newest first.
+
+        :param station_id: Only the breaks of this station's runs, all when None.
+        :param limit: How many breaks to return at most.
+        """
+        entries = [
+            deepcopy(entry)
+            for entry in reversed(self._break_log_entries().values())
+            if not station_id or entry["station_id"] == station_id
+        ]
+        return entries[: max(0, limit)]
+
+    def _break_log_entries(self) -> OrderedDict[str, dict[str, Any]]:
+        """Return the break log, creating it on first use."""
+        if not hasattr(self, "_break_log"):
+            self._break_log = OrderedDict()
+        return self._break_log
+
+    def _note_break(self, clip: QueueItem | str, *, default: bool = False, **fields: Any) -> None:
+        """
+        Write what happened around a break into its log entry.
+
+        :param clip: The break's queue item, or just its queue item id to update an entry
+            that already exists.
+        :param default: Only fill in the fields the entry has not been told yet.
+        :param fields: The entry's fields to set.
+        """
+        log = self._break_log_entries()
+        key = clip if isinstance(clip, str) else clip.queue_item_id
+        if (entry := log.get(key)) is None:
+            if isinstance(clip, str):
+                return
+            attributes = clip.extra_attributes
+            session_id = str(attributes.get(ATTR_SESSION_ID) or "")
+            session = getattr(self, "_sessions", {}).get(session_id)
+            entry = new_break_entry(
+                key,
+                clip.name,
+                session_id,
+                session.station_id if session is not None else "",
+                str(attributes.get(ATTR_HOST_ID) or ""),
+            )
+            log[key] = entry
+            trim_log(log, BREAK_LOG_SIZE)
+        for name, value in fields.items():
+            # a field still at its initial value has not been told anything yet
+            if default and entry.get(name) != _INITIAL_BREAK.get(name):
+                continue
+            entry[name] = value
 
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """
@@ -253,7 +320,7 @@ class AIRadioRenderMixin:
             raise MediaNotFoundError(f"AI Radio clip {item_id} is not in any queue")
         prompt = str(queue_item.extra_attributes.get(ATTR_PROMPT) or "")
         if not prompt:
-            self._record_skip(queue_item, "clip has no prompt to render")
+            self._record_skip(queue_item, "clip has no prompt to render", "no_prompt")
             raise MediaNotFoundError(f"AI Radio clip {item_id} has no prompt to render")
 
         async with self._lock_for(item_id):
@@ -265,10 +332,21 @@ class AIRadioRenderMixin:
                 queue_item.extra_attributes[ATTR_RENDERED_TEXT] = text
                 # the signal is what marks the items cache dirty and schedules the persist
                 self.mass.player_queues.signal_update(queue_item.queue_id, items_changed=True)
+            closer = str(queue_item.extra_attributes.get(ATTR_JINGLE_AFTER) or "")
+            self._note_break(
+                queue_item,
+                text=text,
+                jingle_before=str(queue_item.extra_attributes.get(ATTR_JINGLE) or ""),
+                jingle_after=closer,
+                skipped=None,
+            )
+            self._note_break(
+                queue_item, default=True, into_song={"kind": "jingle" if closer else "direct"}
+            )
             media = await self._cached_clip_media(queue_item, text, item_id)
             gain_db = self._loudness_gain(queue_item.queue_id, media.loudness)
             effects = await self._clip_effects(queue_item, media.loudness)
-            if effects is not None and talk_over is not None:
+            if effects is not None and talk_over is not None and talk_over.kind == "talk_over":
                 effects = _bed_after_talk_over(effects, talk_over, media.duration)
             post = await self._plan_post(queue_item, media, item_id, gain_db, effects)
 
@@ -395,17 +473,19 @@ class AIRadioRenderMixin:
         queue_item = self._find_clip_item(streamdetails.item_id)
         if queue_item is None:
             return None
-        if (talk_over := self._current_talk_over(queue_item)) is not None:
-            # the record plays on under the voice, held down, until it is over
-            return LeadIn(seconds=talk_over.seconds, fade_in=False, duck_depth=talk_over.duck_depth)
+        if (plan := self._current_talk_over(queue_item)) is not None:
+            if plan.kind == "talk_over":
+                # the record plays on under the voice, held down, until it is over
+                return LeadIn(seconds=plan.seconds, fade_in=False, duck_depth=plan.duck_depth)
+            if plan.kind == "crossfade":
+                return LeadIn(seconds=plan.seconds)
+            return None
         host = self._hosts.get(str(queue_item.extra_attributes.get(ATTR_HOST_ID) or "")) or {}
         effects = host.get("effects") or {}
-        mode = effects.get("lead_in")
-        if mode not in ("crossfade", "talk_up"):
+        if effects.get("lead_in") not in ("crossfade", "talk_up"):
             return None
-        seconds = coerce_float(effects.get("lead_in_seconds"), DEFAULT_LEAD_IN_SECONDS)
-        # a talk-up keeps the voice (or jingle) at full level over the song's fading outro
-        return LeadIn(seconds=seconds, fade_in=mode == "crossfade")
+        # nothing was planned for this song, so its singing is unknown: the host's crossfade
+        return LeadIn(seconds=coerce_float(effects.get("lead_in_seconds"), DEFAULT_LEAD_IN_SECONDS))
 
     def _lock_for(self, clip_id: str) -> asyncio.Lock:
         """Return the per-clip render lock, creating it on first use."""
@@ -454,8 +534,17 @@ class AIRadioRenderMixin:
         return media
 
     async def _plan_talk_over(self, queue_item: QueueItem, clip_id: str) -> _TalkOverPlan | None:
-        """Return how far a break starts over the song before it, None when it starts after."""
-        if not queue_item.extra_attributes.get(ATTR_ALLOW_TALK_OVER):
+        """
+        Return how the song before a break blends into it, None when the host's default holds.
+
+        A break from a section that allows it starts over the song's outro once the singing
+        is over. Otherwise the host's crossfade applies, kept off the singing.
+        """
+        host = self._hosts.get(str(queue_item.extra_attributes.get(ATTR_HOST_ID) or "")) or {}
+        host_effects: dict[str, Any] = host.get("effects") or {}
+        allowed = bool(queue_item.extra_attributes.get(ATTR_ALLOW_TALK_OVER))
+        crossfade = host_effects.get("lead_in") in ("crossfade", "talk_up")
+        if not allowed and not crossfade:
             return None
         if not hasattr(self, "_talk_over_plans"):
             self._talk_over_plans = {}
@@ -468,46 +557,108 @@ class AIRadioRenderMixin:
 
         track = self._previous_item(queue_item)
         if track is None or track.media_item is None:
-            self._talk_over_skipped(queue_item.name, "no song before the break")
+            if allowed:
+                self._talk_over_skipped(
+                    queue_item, queue_item.name, "no song before the break", "no_song_before"
+                )
             return None
         if not (duration := _track_seconds(track)):
-            self._talk_over_skipped(track.name, "its length is unknown")
+            if allowed:
+                self._talk_over_skipped(
+                    queue_item, track.name, "its length is unknown", "unknown_length"
+                )
             return None
         # the break can only reach as far back into the song as the queue holds its end back
         # for a crossfade
         if (reach := self._crossfade_reach(queue_item.queue_id)) <= 0:
-            self._talk_over_skipped(track.name, "crossfade is off in this queue")
+            if allowed:
+                self._talk_over_skipped(
+                    queue_item, track.name, "crossfade is off in this queue", "crossfade_off"
+                )
             return None
-        vocal_end, reason = await self._resolve_vocal_end(track)
-        if vocal_end is None:
-            self._talk_over_skipped(track.name, reason)
-            return None
-        host = self._hosts.get(str(queue_item.extra_attributes.get(ATTR_HOST_ID) or "")) or {}
-        host_effects: dict[str, Any] = host.get("effects") or {}
+        vocal_end, lyrics_reason = await self._resolve_vocal_end(track)
         gap = coerce_float(host_effects.get("post_gap_seconds"), POST_TAIL_GAP)
-        seconds = min(duration - vocal_end - gap, reach, duration / 2)
+        outro = duration - vocal_end - gap if vocal_end is not None else None
+        if allowed:
+            if outro is None:
+                self._talk_over_skipped(
+                    queue_item, track.name, lyrics_reason, lyrics_reason_code(lyrics_reason)
+                )
+            elif (
+                plan := self._talk_over_plan(track, duration, outro, reach, host_effects)
+            ) is None:
+                self._talk_over_skipped(
+                    queue_item,
+                    track.name,
+                    f"singing ends at {vocal_end:.1f}s of {duration:.0f}s, too little outro",
+                    "little_outro",
+                    seconds=vocal_end or 0.0,
+                )
+            else:
+                self.logger.info(
+                    "AI Radio talk-over armed on %s: singing ends at %.1fs of %.0fs, the break "
+                    "starts over its last %.1fs",
+                    track.name,
+                    vocal_end,
+                    duration,
+                    plan.seconds,
+                )
+                self._note_break(
+                    queue_item, from_song={"kind": "talk_over", "seconds": plan.seconds}
+                )
+                self._talk_over_plans[clip_id] = plan
+                return plan
+        if not crossfade:
+            return None
+        # the host's crossfade, which never reaches back into the singing
+        seconds = min(
+            coerce_float(host_effects.get("lead_in_seconds"), DEFAULT_LEAD_IN_SECONDS),
+            reach,
+            duration / 2,
+        )
+        if outro is not None:
+            seconds = min(seconds, outro)
+        kind = "crossfade" if seconds >= LEAD_IN_MIN_SECONDS else "cut"
+        plan = _TalkOverPlan(
+            seconds=seconds if kind == "crossfade" else 0.0,
+            track_item_id=track.queue_item_id,
+            kind=kind,
+        )
+        if kind == "crossfade":
+            self._note_break(queue_item, from_song={"kind": "crossfade", "seconds": plan.seconds})
+        else:
+            self.logger.info(
+                "AI Radio crossfade left out on %s: singing ends at %.1fs of %.0fs",
+                track.name,
+                vocal_end,
+                duration,
+            )
+            self._note_break(
+                queue_item,
+                from_song={"kind": "cut", "reason": reason("singing_to_end")},
+            )
+        self._talk_over_plans[clip_id] = plan
+        return plan
+
+    def _talk_over_plan(
+        self,
+        track: QueueItem,
+        duration: float,
+        outro: float,
+        reach: float,
+        host_effects: dict[str, Any],
+    ) -> _TalkOverPlan | None:
+        """Return a talk-over over the given outro, None when it is too short for one."""
+        seconds = min(outro, reach, duration / 2)
         if (max_overlap := coerce_float(host_effects.get("post_max_seconds"), 0.0)) > 0:
             seconds = min(seconds, max_overlap)
         if seconds < POST_MIN_SECONDS:
-            self._talk_over_skipped(
-                track.name, f"singing ends at {vocal_end:.1f}s of {duration:.0f}s, too little outro"
-            )
             return None
-        plan = _TalkOverPlan(
+        return _TalkOverPlan(
             seconds=seconds,
             track_item_id=track.queue_item_id,
             duck_depth=coerce_float(host_effects.get("post_duck_percent"), 60) / 100,
         )
-        self.logger.info(
-            "AI Radio talk-over armed on %s: singing ends at %.1fs of %.0fs, the break starts "
-            "over its last %.1fs",
-            track.name,
-            vocal_end,
-            duration,
-            seconds,
-        )
-        self._talk_over_plans[clip_id] = plan
-        return plan
 
     def _current_talk_over(self, queue_item: QueueItem) -> _TalkOverPlan | None:
         """Return the talk-over planned for a break, None when none is or the song moved."""
@@ -551,17 +702,27 @@ class AIRadioRenderMixin:
 
         :param queue_item: The clip to look at.
         """
-        return self._current_talk_over(queue_item) is not None
+        plan = self._current_talk_over(queue_item)
+        return plan is not None and plan.kind == "talk_over"
 
-    def _talk_over_skipped(self, item_name: str, reason: str) -> None:
+    def _talk_over_skipped(
+        self, clip: QueueItem, item_name: str, why: str, code: str, **values: float
+    ) -> None:
         """Log why an opted-in break does not start over the song before it."""
-        self.logger.info("AI Radio talk-over skipped on %s: %s", item_name, reason)
+        self.logger.info("AI Radio talk-over skipped on %s: %s", item_name, why)
+        self._note_break(clip, from_song={"kind": "cut", "reason": reason(code, **values)})
 
-    def _post_skipped(self, item_name: str, reason: str) -> None:
+    def _post_skipped(
+        self, clip: QueueItem | str, item_name: str, why: str, code: str, **values: float
+    ) -> None:
         """Log why an opted-in break did not post."""
         # INFO: only sections that opted in reach here, and a post that quietly does not
         # happen looks the same as one that was never enabled
-        self.logger.info("AI Radio post skipped on %s: %s", item_name, reason)
+        self.logger.info("AI Radio post skipped on %s: %s", item_name, why)
+        key = clip if isinstance(clip, str) else clip.queue_item_id
+        into_song = self._break_log_entries().get(key, {}).get("into_song") or {}
+        kind = "jingle" if into_song.get("kind") == "jingle" else "direct"
+        self._note_break(clip, into_song={"kind": kind, "reason": reason(code, **values)})
 
     async def _plan_post(
         self,
@@ -576,7 +737,9 @@ class AIRadioRenderMixin:
             return None
         if queue_item.extra_attributes.get(ATTR_JINGLE_AFTER):
             # the jingle closing the break leads into the song, so the voice stays off its intro
-            self._post_skipped(queue_item.name, "a jingle closes the break")
+            self._post_skipped(
+                queue_item, queue_item.name, "a jingle closes the break", "closing_jingle"
+            )
             return None
         if not hasattr(self, "_post_plans"):
             self._post_plans = {}
@@ -584,6 +747,10 @@ class AIRadioRenderMixin:
             # a repeat request for the same clip must get the same split
             plan = self._post_plans[clip_id]
             if plan is None or await self._recheck_post(plan):
+                if plan is not None:
+                    self._note_break(
+                        queue_item, into_song={"kind": "post", "seconds": plan.overlap}
+                    )
                 return plan
             # planned afresh below, so the copy the old split was read from is done with
             await self._delete_staged_clips([plan.staged])
@@ -593,18 +760,26 @@ class AIRadioRenderMixin:
             queue_item.queue_id, queue_item.queue_item_id
         )
         if next_item is None or next_item.media_item is None:
-            self._post_skipped(queue_item.name, "no next track in the queue")
+            self._post_skipped(
+                queue_item, queue_item.name, "no next track in the queue", "no_next_track"
+            )
             return None
-        onset, reason = await self._resolve_vocal_onset(next_item)
+        onset, lyrics_reason = await self._resolve_vocal_onset(next_item)
         if onset is None:
-            self._post_skipped(next_item.name, reason)
+            self._post_skipped(
+                queue_item, next_item.name, lyrics_reason, lyrics_reason_code(lyrics_reason)
+            )
             return None
         host = self._hosts.get(str(queue_item.extra_attributes.get(ATTR_HOST_ID) or "")) or {}
         host_effects: dict[str, Any] = host.get("effects") or {}
         window = self._post_window(queue_item, onset)
         if window < POST_MIN_SECONDS:
             self._post_skipped(
-                next_item.name, f"vocal enters at {onset:.1f}s, too little instrumental intro"
+                queue_item,
+                next_item.name,
+                f"vocal enters at {onset:.1f}s, too little instrumental intro",
+                "early_vocal",
+                seconds=onset,
             )
             return None
 
@@ -612,14 +787,20 @@ class AIRadioRenderMixin:
         jingle_only = ClipEffects(jingle=effects.jingle) if effects and effects.jingle else None
         staged = await self._stage_post_clip(media.path, media.audio_format, gain_db, jingle_only)
         if staged is None:
-            self._post_skipped(next_item.name, "rendered audio could not be staged")
+            self._post_skipped(
+                queue_item, next_item.name, "rendered audio could not be staged", "staging_failed"
+            )
             return None
         staged_path, total = staged
 
         overlap = min(window, total - POST_MIN_HEAD_SECONDS)
         if overlap < POST_MIN_SECONDS:
             self._post_skipped(
-                next_item.name, f"break is only {total:.1f}s, too short to carry over"
+                queue_item,
+                next_item.name,
+                f"break is only {total:.1f}s, too short to carry over",
+                "break_too_short",
+                seconds=total,
             )
             await self._delete_staged_clips([staged_path])
             return None
@@ -644,6 +825,7 @@ class AIRadioRenderMixin:
             overlap,
             onset,
         )
+        self._note_break(queue_item, into_song={"kind": "post", "seconds": overlap})
         self._post_plans[clip_id] = plan
         return plan
 
@@ -651,14 +833,14 @@ class AIRadioRenderMixin:
         """Return whether a planned post can still air, arming or disarming it to match."""
         next_item = self.mass.player_queues.get_next_item(plan.queue_id, plan.clip_item_id)
         if next_item is None or next_item.queue_item_id != plan.track_item_id:
-            reason = "it no longer follows the break"
+            why, code = "it no longer follows the break", "queue_changed"
         elif not await asyncio.to_thread(Path(plan.staged).is_file):
-            reason = "the staged audio is gone"
+            why, code = "the staged audio is gone", "staged_gone"
         else:
             # re-armed because the streams side disarms a post once it is done with it
             plan.armed = True
             return True
-        self._post_skipped(plan.track_name, reason)
+        self._post_skipped(plan.clip_item_id, plan.track_name, why, code)
         plan.armed = False
         return False
 
@@ -878,7 +1060,7 @@ class AIRadioRenderMixin:
                 self.logger.warning(
                     "AI Radio clip %s (%s) skipped: %s", clip_id, queue_item.name, error
                 )
-                self._record_skip(queue_item, error)
+                self._record_skip(queue_item, error, "no_weather")
                 raise MediaNotFoundError(f"AI Radio clip {clip_id} has no weather data")
             # weather is optional in this clip, so the LLM must skip it rather than invent it
             for token in empty_weather_tokens:
@@ -911,7 +1093,7 @@ class AIRadioRenderMixin:
             self.logger.warning(
                 "AI Radio clip %s (%s) failed to generate: %s", clip_id, queue_item.name, err
             )
-            self._record_skip(queue_item, f"generation failed: {err}")
+            self._record_skip(queue_item, f"generation failed: {err}", "generation_failed")
             raise MediaNotFoundError(f"AI Radio clip {clip_id} failed to generate") from err
         text = self._settle_jingles(queue_item, host_id, jingles, text)
         if max_chars > 0:
@@ -952,7 +1134,7 @@ class AIRadioRenderMixin:
             duration = await self._probe_duration(path)
         except Exception as err:
             self.logger.warning("AI Radio clip %s failed TTS: %s", clip_id, err)
-            self._record_skip(queue_item, f"TTS failed: {err}")
+            self._record_skip(queue_item, f"TTS failed: {err}", "tts_failed")
             raise MediaNotFoundError(f"AI Radio clip {clip_id} failed TTS") from err
         # measuring costs a fetch and a decode on the just-in-time render path, so it only
         # runs where the reading has somewhere to go
@@ -1361,8 +1543,9 @@ class AIRadioRenderMixin:
             return None
         return parse_loudnorm(output)
 
-    def _record_skip(self, queue_item: QueueItem, error: str) -> None:
+    def _record_skip(self, queue_item: QueueItem, error: str, code: str = "failed") -> None:
         """Record a skipped clip on its owning session."""
+        self._note_break(queue_item, skipped={"code": code, "detail": error})
         session_id = str(queue_item.extra_attributes.get(ATTR_SESSION_ID) or "")
         if (session := self._sessions.get(session_id)) is None:
             return

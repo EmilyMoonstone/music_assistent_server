@@ -294,9 +294,15 @@ JINGLE_CHOICE_CLOSING = (
 )
 # a jingle phrase this short is too common to take out of a script, like "erste Platte"
 MIN_ECHOED_PHRASE_WORDS = 3
-# how the song before blends into a break: a hard cut, a crossfade, or a talk-up where the
-# break starts at full level over the song's fading outro
-LEAD_IN_MODES = ("cut", "crossfade", "talk_up")
+# how the song before blends into a break that does not talk over its outro: a hard cut
+# or a crossfade, which never reaches back into the singing where the lyrics tell where it
+# ends. A stored "talk_up" (the break at full level over a fixed stretch of the outro, sung
+# or not) reads as a crossfade
+LEAD_IN_MODES = ("cut", "crossfade")
+# a crossfade kept off the singing that ends up shorter than this is left out
+LEAD_IN_MIN_SECONDS = 1.0
+# how many breaks the editor can look back on
+BREAK_LOG_SIZE = 60
 DEFAULT_LEAD_IN = "cut"
 DEFAULT_LEAD_IN_SECONDS = 3
 LEAD_IN_SECONDS_RANGE = (1, 8)

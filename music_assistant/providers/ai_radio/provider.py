@@ -171,6 +171,7 @@ class AIRadioProvider(
             ("ai_radio/engines/tts/list", self.list_tts_engines),
             ("ai_radio/memory/get", self.get_break_memory),
             ("ai_radio/memory/clear", self.clear_break_memory),
+            ("ai_radio/breaks/log", self.get_break_log),
             ("ai_radio/jingles/inspect", self.inspect_jingle),
             ("ai_radio/jingles/analyze", self.analyze_jingle),
             ("ai_radio/jingles/browse", self.browse_jingles),
@@ -191,6 +192,7 @@ class AIRadioProvider(
             "ai_radio/start": Scope.QUEUES_CONTROL,
             "ai_radio/stop": Scope.QUEUES_CONTROL,
             "ai_radio/status": Scope.QUEUES_READ,
+            "ai_radio/breaks/log": Scope.QUEUES_READ,
         }
         for command, handler in api_handlers:
             # the queue DJ menu is queue state, not provider config: a client allowed to

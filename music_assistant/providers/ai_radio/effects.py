@@ -151,6 +151,8 @@ def normalize_effects(raw: Any) -> dict[str, Any]:
     level = coerce_float(effects.get("music_bed_level"), DEFAULT_MUSIC_BED_LEVEL)
     normalized["music_bed_level"] = min(high, max(low, level))
     lead_in = str(effects.get("lead_in") or DEFAULT_LEAD_IN)
+    if lead_in == "talk_up":
+        lead_in = "crossfade"
     normalized["lead_in"] = lead_in if lead_in in LEAD_IN_MODES else DEFAULT_LEAD_IN
     low, high = LEAD_IN_SECONDS_RANGE
     seconds = coerce_float(effects.get("lead_in_seconds"), DEFAULT_LEAD_IN_SECONDS)

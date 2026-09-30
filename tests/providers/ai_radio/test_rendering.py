@@ -1720,7 +1720,7 @@ async def test_copies_left_from_an_earlier_run_are_cleaned_up(
     ("mode", "expected"),
     [
         ("crossfade", LeadIn(seconds=4, fade_in=True)),
-        ("talk_up", LeadIn(seconds=4, fade_in=False)),
+        ("talk_up", LeadIn(seconds=4)),
         ("cut", None),
     ],
 )
