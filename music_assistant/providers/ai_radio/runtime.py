@@ -41,6 +41,7 @@ from .constants import (
     AI_ORDER_REPLY_INSTRUCTION,
     AI_QUERY_TIMEOUT_SECONDS,
     ATTR_ALLOW_POST,
+    ATTR_ALLOW_TALK_OVER,
     ATTR_HOST_ID,
     ATTR_JINGLE_AFTER_MODE,
     ATTR_JINGLE_BEFORE_MODE,
@@ -767,6 +768,7 @@ class AIRadioRuntimeMixin:
                     web_search_mode=self._resolve_web_search_mode(section, section_id),
                     weather_required=weather_required,
                     allow_post=bool(section.get("allow_post", False)),
+                    allow_talk_over=bool(section.get("allow_talk_over", False)),
                     jingle_before=str(section.get("jingle_before") or DEFAULT_JINGLE_SLOT_MODE),
                     jingle_after=str(section.get("jingle_after") or DEFAULT_JINGLE_SLOT_MODE),
                     history_events=[(section_id, slot_event(slot))],
@@ -835,6 +837,11 @@ class AIRadioRuntimeMixin:
             bool(section_by_id.get(section_id, {}).get("allow_post", False))
             for section_id in section_ids
         )
+        # the same goes for the part that may end up over the record before it
+        all_allow_talk_over = all(
+            bool(section_by_id.get(section_id, {}).get("allow_talk_over", False))
+            for section_id in section_ids
+        )
         # a merged break has one opening and one closing, so a jingle any part asks for plays
         # and one is left out only when every part leaves it out
         grouped_sections = [section_by_id.get(section_id, {}) for section_id in section_ids]
@@ -885,6 +892,7 @@ class AIRadioRuntimeMixin:
             web_search_mode=max_web_mode,
             weather_required=all_weather_required,
             allow_post=all_allow_post,
+            allow_talk_over=all_allow_talk_over,
             jingle_before=jingle_before,
             jingle_after=jingle_after,
             history_events=history_events,
@@ -966,6 +974,7 @@ class AIRadioRuntimeMixin:
                 ATTR_WEATHER_REQUIRED: section.weather_required,
                 ATTR_SLOT_WHEN: section.when,
                 ATTR_ALLOW_POST: section.allow_post,
+                ATTR_ALLOW_TALK_OVER: section.allow_talk_over,
                 ATTR_JINGLE_BEFORE_MODE: section.jingle_before,
                 ATTR_JINGLE_AFTER_MODE: section.jingle_after,
             }

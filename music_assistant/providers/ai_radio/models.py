@@ -38,6 +38,8 @@ class PlannedSection:
     weather_required: bool = False
     # when true, the section's break may be split so its tail plays over the next record's intro
     allow_post: bool = False
+    # when true, the section's break may start over the outro of the record before it
+    allow_talk_over: bool = False
     # what the section says about a jingle ahead of and after its break, see JINGLE_SLOT_MODES
     jingle_before: str = "auto"
     jingle_after: str = "auto"

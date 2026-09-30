@@ -128,6 +128,9 @@ ATTR_JINGLE = "ai_radio_jingle"
 # per-section opt-in: a break from a section that allows it may be split so its tail
 # carries over the next record's intro (a "post")
 ATTR_ALLOW_POST = "ai_radio_allow_post"
+# per-section opt-in, the counterpart of a post: a break from a section that allows it may
+# start over the outro of the record before it, once the singing is over
+ATTR_ALLOW_TALK_OVER = "ai_radio_allow_talk_over"
 
 # A post is the tail of one continuous break mixed over the next record's intro. With a
 # break of B seconds and W seconds of intro before the vocal:
@@ -147,6 +150,10 @@ POST_MIN_SECONDS = 1.5  # shortest overlap worth doing; below it the break plays
 POST_MIN_HEAD_SECONDS = 1.0  # the break keeps at least this much for its own queue item
 # MA's lyrics lookup walks every metadata provider; past this budget the break plays whole
 POST_LYRICS_TIMEOUT = 8.0
+# A talk-over starts the break over the record before it, POST_TAIL_GAP after its singing
+# ends, with the record held down under the voice. The host's post gap, longest stretch and
+# duck apply to it too. A last sung line with nothing timed after it is taken to run this long
+TALK_OVER_LAST_LINE_SECONDS = 6.0
 # a postable break is rendered once into a local, levelled copy; a render this slow is wedged
 POST_STAGE_TIMEOUT = 20
 # staged copies: their file name prefix, and the age past which one is a leftover to delete

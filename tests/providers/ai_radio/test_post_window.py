@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from music_assistant.providers.ai_radio.post_window import is_sung, lyric_onset
+from music_assistant.providers.ai_radio.post_window import is_sung, lyric_end, lyric_onset
 
 
 @pytest.mark.parametrize(
@@ -108,3 +108,28 @@ def test_an_untimed_line_cannot_set_the_onset() -> None:
 def test_lyrics_with_only_labels_have_no_onset() -> None:
     """An instrumental with nothing but labels and filler gives no vocal entry."""
     assert lyric_onset("[00:00.00][Intro]\n[00:20.00](Instrumental)\n[00:30.00]♪") is None
+
+
+@pytest.mark.parametrize(
+    ("lyrics", "expected"),
+    [
+        pytest.param(
+            "[00:12.00]First line\n[03:05.50]Last line\n[03:09.20]",
+            189.2,
+            id="an empty line marks the end",
+        ),
+        pytest.param(
+            "[00:12.00]First line\n[03:05.50]Last line\n[03:10.00][Outro]",
+            190.0,
+            id="a section label marks the end",
+        ),
+        pytest.param(
+            "[00:12.00]First line\n[03:05.50]Last line", 191.5, id="the last line is estimated"
+        ),
+        pytest.param("[00:00.00][Instrumental]", None, id="nothing is sung"),
+        pytest.param("", None, id="no lyrics"),
+    ],
+)
+def test_where_the_singing_ends(lyrics: str, expected: float | None) -> None:
+    """The line after the last sung one ends it; without one the last line gets a set length."""
+    assert lyric_end(lyrics, 6.0) == (pytest.approx(expected) if expected is not None else None)

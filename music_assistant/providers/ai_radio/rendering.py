@@ -17,7 +17,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from music_assistant_models.enums import ContentType, StreamType, VolumeNormalizationMode
+from music_assistant_models.enums import (
+    ContentType,
+    CrossfadeMode,
+    StreamType,
+    VolumeNormalizationMode,
+)
 from music_assistant_models.errors import (
     AudioError,
     InvalidDataError,
@@ -28,12 +33,15 @@ from music_assistant_models.media_items import AudioFormat, Track
 from music_assistant_models.streamdetails import StreamDetails
 
 from music_assistant.constants import (
+    CONF_CROSSFADE_DURATION,
+    CONF_PLAYER_QUEUES,
     CONF_VALUE_DISABLED,
     CONF_VALUE_ENABLED,
     CONF_VOLUME_NORMALIZATION,
     CONF_VOLUME_NORMALIZATION_TARGET,
     CONF_VOLUME_NORMALIZATION_TRACKS,
 )
+from music_assistant.controllers.streams.smart_fades.helpers import SMART_CROSSFADE_DURATION
 from music_assistant.helpers.audio import parse_loudnorm
 from music_assistant.helpers.dsp import ComplexFilter
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
@@ -48,6 +56,7 @@ from music_assistant.models.plugin import LeadIn, VoiceOver
 
 from .constants import (
     ATTR_ALLOW_POST,
+    ATTR_ALLOW_TALK_OVER,
     ATTR_HOST_ID,
     ATTR_JINGLE,
     ATTR_JINGLE_AFTER,
@@ -74,6 +83,7 @@ from .constants import (
     DEFAULT_TTS_LOUDNESS_BOOST,
     DEFERRED_PLACEHOLDERS,
     EFFECT_MEASURE_SECONDS,
+    JINGLE_VOICE_OVERLAP_SECONDS,
     LOUDNESS_MEASURE_TIMEOUT,
     MIN_CLIP_COPY_BYTES,
     MIN_CLIP_MEDIA_LIFETIME,
@@ -88,6 +98,7 @@ from .constants import (
     POST_STAGED_FORMAT,
     POST_TAIL_GAP,
     RECENT_NEWS_PLACEHOLDER,
+    TALK_OVER_LAST_LINE_SECONDS,
     TTS_CLIP_PCM_FORMAT,
     TTS_PEAK_CEILING_DB,
     TTS_SERVER_ERROR_MARKERS,
@@ -111,10 +122,10 @@ from .effects import (
     wants_after_jingle,
 )
 from .helpers import coerce_float, coerce_int, format_ai_radio_timestamp, soft_limit_text
-from .post_window import lyric_onset
+from .post_window import lyric_end, lyric_onset
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Callable
 
     from music_assistant_models.config_entries import ProviderConfig
     from music_assistant_models.enums import MediaType
@@ -155,6 +166,16 @@ class _PostPlan:
     # whether the tail is still due to air over the record; settled when the break's audio
     # is produced, and cleared once the streams side is done with it
     armed: bool = True
+
+
+@dataclass(slots=True)
+class _TalkOverPlan:
+    """How far a break starts over the outro of the record before it."""
+
+    seconds: float  # the stretch at the end of the record the break plays over
+    track_item_id: str  # the record
+    # fraction of the record's level removed under the break, as the host is set up to
+    duck_depth: float | None = None
 
 
 @dataclass(slots=True)
@@ -214,6 +235,7 @@ class AIRadioRenderMixin:
     _render_locks: dict[str, asyncio.Lock]
     _media_cache: dict[str, _CachedClipMedia]
     _post_plans: dict[str, _PostPlan | None]
+    _talk_over_plans: dict[str, _TalkOverPlan | None]
     _engine_loudness: dict[tuple[str, str, str], float]
     _effect_assets: dict[str, tuple[float, float]]
     _last_jingles: dict[str, str]
@@ -235,6 +257,8 @@ class AIRadioRenderMixin:
             raise MediaNotFoundError(f"AI Radio clip {item_id} has no prompt to render")
 
         async with self._lock_for(item_id):
+            # planned first: whether the break starts over the song before decides its opener
+            talk_over = await self._plan_talk_over(queue_item, item_id)
             text = str(queue_item.extra_attributes.get(ATTR_RENDERED_TEXT) or "")
             if not text:
                 text = await self._generate_script(queue_item, prompt, item_id)
@@ -244,6 +268,8 @@ class AIRadioRenderMixin:
             media = await self._cached_clip_media(queue_item, text, item_id)
             gain_db = self._loudness_gain(queue_item.queue_id, media.loudness)
             effects = await self._clip_effects(queue_item, media.loudness)
+            if effects is not None and talk_over is not None:
+                effects = _bed_after_talk_over(effects, talk_over, media.duration)
             post = await self._plan_post(queue_item, media, item_id, gain_db, effects)
 
         streamdetails = StreamDetails(
@@ -369,6 +395,9 @@ class AIRadioRenderMixin:
         queue_item = self._find_clip_item(streamdetails.item_id)
         if queue_item is None:
             return None
+        if (talk_over := self._current_talk_over(queue_item)) is not None:
+            # the record plays on under the voice, held down, until it is over
+            return LeadIn(seconds=talk_over.seconds, fade_in=False, duck_depth=talk_over.duck_depth)
         host = self._hosts.get(str(queue_item.extra_attributes.get(ATTR_HOST_ID) or "")) or {}
         effects = host.get("effects") or {}
         mode = effects.get("lead_in")
@@ -415,6 +444,7 @@ class AIRadioRenderMixin:
             expired = self._media_cache.pop(expired_id)
             if plan := getattr(self, "_post_plans", {}).pop(expired_id, None):
                 expired_staged.append(plan.staged)
+            getattr(self, "_talk_over_plans", {}).pop(expired_id, None)
             if _is_clip_copy(expired.path) and expired.path != path:
                 expired_copies.append(expired.path)
         if cached is not None and _is_clip_copy(cached.path) and cached.path != path:
@@ -422,6 +452,110 @@ class AIRadioRenderMixin:
         self._media_cache[clip_id] = media
         await self._delete_staged_clips(expired_staged + expired_copies)
         return media
+
+    async def _plan_talk_over(self, queue_item: QueueItem, clip_id: str) -> _TalkOverPlan | None:
+        """Return how far a break starts over the song before it, None when it starts after."""
+        if not queue_item.extra_attributes.get(ATTR_ALLOW_TALK_OVER):
+            return None
+        if not hasattr(self, "_talk_over_plans"):
+            self._talk_over_plans = {}
+        if clip_id in self._talk_over_plans:
+            # a repeat request keeps the plan while the same song still comes before
+            plan = self._talk_over_plans[clip_id]
+            if plan is None or self._current_talk_over(queue_item) is plan:
+                return plan
+        self._talk_over_plans[clip_id] = None
+
+        track = self._previous_item(queue_item)
+        if track is None or track.media_item is None:
+            self._talk_over_skipped(queue_item.name, "no song before the break")
+            return None
+        if not (duration := _track_seconds(track)):
+            self._talk_over_skipped(track.name, "its length is unknown")
+            return None
+        # the break can only reach as far back into the song as the queue holds its end back
+        # for a crossfade
+        if (reach := self._crossfade_reach(queue_item.queue_id)) <= 0:
+            self._talk_over_skipped(track.name, "crossfade is off in this queue")
+            return None
+        vocal_end, reason = await self._resolve_vocal_end(track)
+        if vocal_end is None:
+            self._talk_over_skipped(track.name, reason)
+            return None
+        host = self._hosts.get(str(queue_item.extra_attributes.get(ATTR_HOST_ID) or "")) or {}
+        host_effects: dict[str, Any] = host.get("effects") or {}
+        gap = coerce_float(host_effects.get("post_gap_seconds"), POST_TAIL_GAP)
+        seconds = min(duration - vocal_end - gap, reach, duration / 2)
+        if (max_overlap := coerce_float(host_effects.get("post_max_seconds"), 0.0)) > 0:
+            seconds = min(seconds, max_overlap)
+        if seconds < POST_MIN_SECONDS:
+            self._talk_over_skipped(
+                track.name, f"singing ends at {vocal_end:.1f}s of {duration:.0f}s, too little outro"
+            )
+            return None
+        plan = _TalkOverPlan(
+            seconds=seconds,
+            track_item_id=track.queue_item_id,
+            duck_depth=coerce_float(host_effects.get("post_duck_percent"), 60) / 100,
+        )
+        self.logger.info(
+            "AI Radio talk-over armed on %s: singing ends at %.1fs of %.0fs, the break starts "
+            "over its last %.1fs",
+            track.name,
+            vocal_end,
+            duration,
+            seconds,
+        )
+        self._talk_over_plans[clip_id] = plan
+        return plan
+
+    def _current_talk_over(self, queue_item: QueueItem) -> _TalkOverPlan | None:
+        """Return the talk-over planned for a break, None when none is or the song moved."""
+        clip_id = queue_item.media_item.item_id if queue_item.media_item else ""
+        plans: dict[str, _TalkOverPlan | None] = getattr(self, "_talk_over_plans", {})
+        if (plan := plans.get(clip_id)) is None:
+            return None
+        track = self._previous_item(queue_item)
+        if track is None or track.queue_item_id != plan.track_item_id:
+            return None
+        return plan
+
+    def _previous_item(self, queue_item: QueueItem) -> QueueItem | None:
+        """Return the queue item played before a clip, None when it opens the queue."""
+        queues = self.mass.player_queues
+        index = queues.index_by_id(queue_item.queue_id, queue_item.queue_item_id)
+        if not index:
+            return None
+        return queues.get_item(queue_item.queue_id, index - 1)
+
+    def _crossfade_reach(self, queue_id: str) -> float:
+        """Return how many seconds of a song's end the queue holds back to blend, 0 for none."""
+        queue = self.mass.player_queues.get(queue_id)
+        if queue is None:
+            return 0.0
+        mode = self.mass.streams.get_crossfade_mode(queue)
+        if mode == CrossfadeMode.DISABLED:
+            return 0.0
+        if mode == CrossfadeMode.SMART_CROSSFADE:
+            return float(SMART_CROSSFADE_DURATION)
+        return coerce_float(
+            self.mass.config.get_raw_core_config_value(
+                CONF_PLAYER_QUEUES, CONF_CROSSFADE_DURATION, 8
+            ),
+            8.0,
+        )
+
+    def _talk_over_fits(self, queue_item: QueueItem) -> bool:
+        """
+        Return whether a break is set to start over the outro of the song before it.
+
+        :param queue_item: The clip to look at.
+        """
+        return self._current_talk_over(queue_item) is not None
+
+    def _talk_over_skipped(self, item_name: str, reason: str) -> None:
+        """Log why an opted-in break does not start over the song before it."""
+        self.logger.info("AI Radio talk-over skipped on %s: %s", item_name, reason)
 
     def _post_skipped(self, item_name: str, reason: str) -> None:
         """Log why an opted-in break did not post."""
@@ -590,6 +724,7 @@ class AIRadioRenderMixin:
         plans = getattr(self, "_post_plans", {})
         staged = [plan.staged for plan in plans.values() if plan is not None]
         plans.clear()
+        getattr(self, "_talk_over_plans", {}).clear()
         await self._delete_staged_clips(staged)
 
     async def _delete_staged_clips(self, paths: list[str]) -> None:
@@ -615,10 +750,22 @@ class AIRadioRenderMixin:
 
     async def _resolve_vocal_onset(self, queue_item: QueueItem) -> tuple[float | None, str]:
         """Return the second the next track's vocal enters, and the reason when there is none."""
+        return await self._resolve_lyric_time(queue_item, lyric_onset)
+
+    async def _resolve_vocal_end(self, queue_item: QueueItem) -> tuple[float | None, str]:
+        """Return the second a track's singing is over, and the reason when it is unknown."""
+        return await self._resolve_lyric_time(
+            queue_item, lambda lrc: lyric_end(lrc, TALK_OVER_LAST_LINE_SECONDS)
+        )
+
+    async def _resolve_lyric_time(
+        self, queue_item: QueueItem, read: Callable[[str | None], float | None]
+    ) -> tuple[float | None, str]:
+        """Return a second read from a track's synced lyrics, and the reason when there is none."""
         media_item = queue_item.media_item
         if not isinstance(media_item, Track):
             return None, "no track details"
-        if (onset := lyric_onset(media_item.metadata.lrc_lyrics)) is not None:
+        if (onset := read(media_item.metadata.lrc_lyrics)) is not None:
             return onset, ""
         try:
             # the lookup walks every metadata provider, longer than a clip about to air can wait
@@ -628,7 +775,7 @@ class AIRadioRenderMixin:
             return None, f"lyrics lookup took longer than {POST_LYRICS_TIMEOUT:.0f}s"
         except MusicAssistantError as err:
             return None, f"lyrics lookup failed ({err})"
-        if (onset := lyric_onset(lrc_lyrics)) is not None:
+        if (onset := read(lrc_lyrics)) is not None:
             return onset, ""
         if lrc_lyrics:
             return None, "synced lyrics have no sung line"
@@ -1138,16 +1285,6 @@ class AIRadioRenderMixin:
             window = min(window, max_overlap)
         return window
 
-    def _talk_over_fits(self, queue_item: QueueItem) -> bool:
-        """
-        Return whether a break is set to start over the outro of the song before it.
-
-        Without the talk-over support no break does, so an opener is never held back for one.
-
-        :param queue_item: The clip to look at.
-        """
-        return False
-
     def _next_track_genres(self, queue_item: QueueItem) -> set[str]:
         """Return the lowercase genres of the track after a clip, empty when unknown."""
         next_item = self.mass.player_queues.get_next_item(
@@ -1240,6 +1377,39 @@ def _is_news_clip(queue_item: QueueItem) -> bool:
     return str(attributes.get(ATTR_WEB_SEARCH_MODE) or "") == "force" or (
         RECENT_NEWS_PLACEHOLDER in str(attributes.get(ATTR_PROMPT) or "")
     )
+
+
+def _track_seconds(queue_item: QueueItem) -> float:
+    """Return how long a song runs, from its stream when it has one, 0 when unknown."""
+    streamdetails = queue_item.streamdetails
+    if streamdetails is not None and streamdetails.duration:
+        return float(streamdetails.duration)
+    return float(queue_item.duration or 0)
+
+
+def _bed_after_talk_over(
+    effects: ClipEffects, talk_over: _TalkOverPlan, voice_seconds: int | None
+) -> ClipEffects | None:
+    """
+    Return a break's effects with its bed held back until the song under it is over.
+
+    :param effects: The sounds the break is dressed with.
+    :param talk_over: How far the break starts over the song before it.
+    :param voice_seconds: The whole seconds the voice runs, None when unknown.
+    """
+    if effects.bed is None:
+        return effects
+    # an opener plays first, so the voice, and the bed under it, start that much later
+    opener = (
+        max(0.0, effects.jingle.seconds - JINGLE_VOICE_OVERLAP_SECONDS) if effects.jingle else 0.0
+    )
+    delay = round(max(0.0, talk_over.seconds - opener), 2)
+    if voice_seconds is not None and delay >= voice_seconds:
+        # held back that long the bed would only come in after the voice, so it is left out
+        if effects.jingle is None and effects.after is None:
+            return None
+        return replace(effects, bed=None)
+    return replace(effects, bed_delay=delay)
 
 
 def _jingle_mode(queue_item: QueueItem, key: str) -> str:

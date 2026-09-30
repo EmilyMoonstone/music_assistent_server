@@ -1,5 +1,5 @@
 """
-Vocal-onset detection for posts: the second the singing starts, read from synced lyrics.
+Vocal timing for posts and talk-overs: when the singing starts and ends, from synced lyrics.
 
 Parsing is left to :func:`normalize_lrc_lyrics`, which strips ID tags and word timings,
 expands multi-timestamp lines and sorts the result, so only the leading timestamp of a
@@ -72,6 +72,37 @@ def is_sung(text: str) -> bool:
         inner = inner[1:-1]
     candidate = _MARKER_INDEX_RE.sub("", inner.strip().lower()).strip(" :-")
     return candidate not in _SECTION_MARKERS
+
+
+def _timed_lines(lrc_lyrics: str | None) -> list[tuple[float, str]]:
+    """Return the (second, text) of each timed line of synced lyrics, in order."""
+    if not (normalized := normalize_lrc_lyrics(lrc_lyrics)):
+        return []
+    lines: list[tuple[float, str]] = []
+    for line in normalized.splitlines():
+        if match := _LEADING_TIMESTAMP_RE.match(line.strip()):
+            seconds = int(match.group(1)) * 60 + float(match.group(2).replace(":", "."))
+            lines.append((seconds, match.group(3)))
+    return lines
+
+
+def lyric_end(lrc_lyrics: str | None, last_line_seconds: float) -> float | None:
+    """
+    Return the second at which the singing is over, or None when it cannot be told.
+
+    :param lrc_lyrics: Synced lyrics in LRC format, may be None or empty.
+    :param last_line_seconds: How long the last sung line is taken to run when nothing is
+        timed after it.
+    """
+    lines = _timed_lines(lrc_lyrics)
+    sung = [index for index, (_seconds, text) in enumerate(lines) if is_sung(text)]
+    if not sung:
+        return None
+    last = sung[-1]
+    # an empty line or a section label after the last sung line marks where it stops
+    if last + 1 < len(lines):
+        return lines[last + 1][0]
+    return lines[last][0] + last_line_seconds
 
 
 def lyric_onset(lrc_lyrics: str | None) -> float | None:

@@ -1166,6 +1166,36 @@ def test_merged_clip_carries_over_only_when_every_section_allows_it(
     assert planned[0].allow_post is expected
 
 
+@pytest.mark.parametrize(("news_allows", "expected"), [(True, True), (False, False)])
+def test_merged_clip_talks_over_only_when_every_section_allows_it(
+    news_allows: bool, expected: bool
+) -> None:
+    """Any section of a merged recording may open it, so all must opt in to the talk-over."""
+    runtime = DummyRuntime()
+    _set_runtime_mass(runtime, SimpleNamespace(metadata=SimpleNamespace(locale="en_US")))
+    station = _merge_weather_news_station()
+    station["sections"][0]["allow_talk_over"] = True
+    station["sections"][1]["allow_talk_over"] = news_allows
+    tracks = [
+        {"index": 0, "songinfo": "A - One", "duration": 200},
+        {"index": 1, "songinfo": "B - Two", "duration": 200},
+    ]
+
+    planned, _history = runtime._plan_sections(
+        session_id="sess",
+        tracks=tracks,
+        program=station,
+        track_index_offset=0,
+        minute_offset=0.0,
+        history_state={},
+        allowed_slot_when=["between_songs"],
+        runtime_tokens={"<weather_hourly>": "12 degrees"},
+    )
+
+    assert len(planned) == 1
+    assert planned[0].allow_talk_over is expected
+
+
 def test_mixed_purpose_section_without_a_weather_guard_is_not_weather_required() -> None:
     """A prompt that just mentions the weather must not skip the whole clip on a failed fetch."""
     runtime = DummyRuntime()

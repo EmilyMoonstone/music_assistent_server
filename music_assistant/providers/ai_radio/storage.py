@@ -210,6 +210,8 @@ class AIRadioStorageMixin:
             # only stored when on, like the constraints: a missing key reads as off everywhere
             if section.get("allow_post"):
                 normalized["allow_post"] = True
+            if section.get("allow_talk_over"):
+                normalized["allow_talk_over"] = True
             # only stored when set, like the constraints: a missing key reads as auto
             for key in ("jingle_before", "jingle_after"):
                 mode = str(section.get(key) or DEFAULT_JINGLE_SLOT_MODE).strip().lower()

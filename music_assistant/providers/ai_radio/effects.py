@@ -82,6 +82,9 @@ class ClipEffects:
     bed: EffectSound | None = None
     # the jingle closing the break, leading into the next song
     after: EffectSound | None = None
+    # seconds the bed waits before it fades in, while the song before still plays under
+    # the voice of a break that starts over its outro
+    bed_delay: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,6 +524,7 @@ def effect_filters(effects: ClipEffects, voice_seconds: int | None) -> list[str 
         # the duration is whole seconds and cut short, so the voice may run on for almost
         # a second more: the padding covers that, and the fade only starts once it is over
         filters.append(f"apad=pad_dur={MUSIC_BED_TAIL_SECONDS + 1}")
+        delay = f",adelay={round(effects.bed_delay * 1000)}:all=1" if effects.bed_delay else ""
         filters.append(
             ComplexFilter(
                 body="amix=inputs=2:duration=first:normalize=0",
@@ -529,7 +533,7 @@ def effect_filters(effects: ClipEffects, voice_seconds: int | None) -> list[str 
                         path=bed.path,
                         filters=(
                             f"volume={round(bed.gain_db, 2)}dB,"
-                            f"afade=t=in:d={MUSIC_BED_FADE_IN_SECONDS}"
+                            f"afade=t=in:d={MUSIC_BED_FADE_IN_SECONDS}{delay}"
                         ),
                         input_args=["-stream_loop", "-1"],
                     )

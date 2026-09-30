@@ -137,6 +137,21 @@ def test_normalize_section_stores_allow_post_only_when_on(
     assert {key: normalized[key] for key in normalized if key == "allow_post"} == expected
 
 
+@pytest.mark.parametrize(("value", "expected"), [(True, {"allow_talk_over": True}), (False, {})])
+def test_normalize_section_stores_allow_talk_over_only_when_on(
+    value: bool, expected: dict[str, Any]
+) -> None:
+    """Like the post, the talk-over is only stored for a section that opted in."""
+    storage = DummyStorage()
+
+    normalized = storage._normalize_section(
+        {"id": "back_announce", "name": "Back announce", "type": "ai_text", "prompt": "Talk."}
+        | {"allow_talk_over": value}
+    )
+
+    assert {key: normalized[key] for key in normalized if key == "allow_talk_over"} == expected
+
+
 def test_normalize_station_rejects_missing_source_playlist_id() -> None:
     """Reject stations without a source playlist reference."""
     storage = DummyStorage()
