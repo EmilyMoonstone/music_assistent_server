@@ -637,8 +637,9 @@ class AIRadioRenderMixin:
         if not effects.get("jingles"):
             return []
         mode = _jingle_mode(queue_item, ATTR_JINGLE_BEFORE_MODE)
-        # a break that starts over the song before it has that song's outro for an opener
-        if mode == "never" or (mode == "no_post" and self._talk_over_fits(queue_item)):
+        # a break that starts over the song before it has that song's outro for an opener,
+        # unless its section asks for a jingle every time
+        if mode == "never" or (mode != "always" and self._talk_over_fits(queue_item)):
             return []
         always = mode in ("always", "no_post")
         # news, weather and a show's ends always get theirs, a plain transition only now and

@@ -1647,20 +1647,28 @@ async def test_a_section_can_close_with_a_jingle_only_when_it_cannot_post(
     assert item.extra_attributes[ATTR_JINGLE_AFTER] == closer
 
 
-@pytest.mark.parametrize(("talk_over_fits", "opener"), [(False, "/media/indie.mp3"), (True, "")])
+@pytest.mark.parametrize(
+    ("mode", "talk_over_fits", "opener"),
+    [
+        ("no_post", False, "/media/indie.mp3"),
+        ("no_post", True, ""),
+        ("auto", True, ""),
+        ("always", True, "/media/indie.mp3"),
+    ],
+)
 async def test_a_section_can_open_with_a_jingle_only_when_it_cannot_talk_over(
-    talk_over_fits: bool, opener: str
+    mode: str, talk_over_fits: bool, opener: str
 ) -> None:
-    """'no_post' opens every break with a jingle, unless it starts over the song's outro."""
+    """A break that starts over the song's outro opens bare, unless it asks for a jingle."""
     renderer = DummyRenderer()
-    _jingle_host(renderer, chance=0)
+    _jingle_host(renderer, chance=100 if mode == "auto" else 0)
     renderer.next_genres = set()
     renderer.llm_reply = "JINGLE: 2\nGood evening."
     renderer._talk_over_fits = lambda _item: talk_over_fits
     item = _clip_item(
         "sess_001",
         **TRANSITION,
-        **{ATTR_JINGLE_BEFORE_MODE: "no_post", ATTR_JINGLE_AFTER_MODE: "never"},
+        **{ATTR_JINGLE_BEFORE_MODE: mode, ATTR_JINGLE_AFTER_MODE: "never"},
     )
     _attach_queue(renderer, [item])
 
