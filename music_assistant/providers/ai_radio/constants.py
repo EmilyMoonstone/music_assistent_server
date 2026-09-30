@@ -301,6 +301,12 @@ MIN_ECHOED_PHRASE_WORDS = 3
 LEAD_IN_MODES = ("cut", "crossfade")
 # a crossfade kept off the singing that ends up shorter than this is left out
 LEAD_IN_MIN_SECONDS = 1.0
+# a rehearsal of a segment: its file name prefix, the songs it names when the player's
+# queue has none, how far it looks for them and how long its rendering may take
+PROBE_CLIP_PREFIX = "ma_ai_radio_probe_"
+PROBE_EXAMPLE_SONGS = ("Queen - Bohemian Rhapsody", "Daft Punk - Get Lucky", "ABBA - Dancing Queen")
+PROBE_SONG_LOOKAHEAD = 10
+PROBE_RENDER_TIMEOUT = 30
 # how many breaks the editor can look back on
 BREAK_LOG_SIZE = 60
 DEFAULT_LEAD_IN = "cut"

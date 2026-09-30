@@ -59,6 +59,7 @@ from .helpers import check_player_access, has_player_access, utc_now_iso
 from .hosts import AIRadioHostsMixin
 from .memory import AIRadioMemoryMixin
 from .models import DJQueueState, SessionState
+from .probe import AIRadioProbeMixin
 from .queue_dj import AIRadioQueueDJMixin
 from .rendering import AIRadioRenderMixin
 from .runtime import AIRadioRuntimeMixin
@@ -83,6 +84,7 @@ async def setup(
 class AIRadioProvider(
     AIRadioRuntimeMixin,
     AIRadioRenderMixin,
+    AIRadioProbeMixin,
     AIRadioMemoryMixin,
     AIRadioHostsMixin,
     AIRadioQueueDJMixin,
@@ -168,6 +170,7 @@ class AIRadioProvider(
             ("ai_radio/hosts/delete", self.delete_host),
             ("ai_radio/hosts/template", self.host_template),
             ("ai_radio/hosts/presets/list", self.list_host_presets),
+            ("ai_radio/hosts/probe", self.probe_segment),
             ("ai_radio/engines/tts/list", self.list_tts_engines),
             ("ai_radio/memory/get", self.get_break_memory),
             ("ai_radio/memory/clear", self.clear_break_memory),
@@ -509,6 +512,22 @@ class AIRadioProvider(
                 raise InvalidDataError(f"Jingle not found: {source}")
             url = self._jingle_preview_url(path)
         await self.mass.players.play_announcement(player_id, url, pre_announce=False)
+
+    async def probe_segment(
+        self, host: dict[str, Any], section: dict[str, Any], player_id: str
+    ) -> dict[str, Any]:
+        """
+        Rehearse one segment of a host on a player, and return what was said.
+
+        :param host: The host as the editor has it, saved or not.
+        :param section: The segment to rehearse.
+        :param player_id: The player to play the rehearsal on.
+        """
+        check_player_access(player_id)
+        result = await self.render_probe(host, section, player_id)
+        url = self._jingle_preview_url(Path(result.pop("path")))
+        await self.mass.players.play_announcement(player_id, url, pre_announce=False)
+        return result
 
     async def host_template(self) -> dict[str, Any]:
         """Return a default host template."""
