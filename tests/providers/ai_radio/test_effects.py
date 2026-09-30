@@ -401,6 +401,8 @@ def test_the_gap_between_closing_jingles_is_kept_in_range() -> None:
     ("modes", "expected"),
     [
         (["", "always"], "always"),
+        (["no_post", "always"], "always"),
+        (["no_post", "never"], "no_post"),
         (["never", "never"], "never"),
         (["never", ""], "auto"),
         (["never", "auto"], "auto"),

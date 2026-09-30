@@ -1829,6 +1829,51 @@ async def test_a_section_decides_its_jingles_itself() -> None:
     assert item.extra_attributes[ATTR_JINGLE_AFTER] == ""
 
 
+@pytest.mark.parametrize(("post_fits", "closer"), [(False, "/media/indie.mp3"), (True, "")])
+async def test_a_section_can_close_with_a_jingle_only_when_it_cannot_post(
+    post_fits: bool, closer: str
+) -> None:
+    """'no_post' closes every break with a jingle, unless the voice can talk over the intro."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer, chance=0)
+    renderer.next_genres = set()
+    renderer.llm_reply = "AFTER: 2\nGood evening."
+    renderer._post_fits = lambda _item, _onset: post_fits
+    item = _clip_item(
+        "sess_001",
+        **TRANSITION,
+        **{ATTR_JINGLE_BEFORE_MODE: "never", ATTR_JINGLE_AFTER_MODE: "no_post"},
+    )
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert ("AFTER" in renderer.llm_prompts[0]) is not post_fits
+    assert item.extra_attributes[ATTR_JINGLE_AFTER] == closer
+
+
+@pytest.mark.parametrize(("talk_over_fits", "opener"), [(False, "/media/indie.mp3"), (True, "")])
+async def test_a_section_can_open_with_a_jingle_only_when_it_cannot_talk_over(
+    talk_over_fits: bool, opener: str
+) -> None:
+    """'no_post' opens every break with a jingle, unless it starts over the song's outro."""
+    renderer = DummyRenderer()
+    _jingle_host(renderer, chance=0)
+    renderer.next_genres = set()
+    renderer.llm_reply = "JINGLE: 2\nGood evening."
+    renderer._talk_over_fits = lambda _item: talk_over_fits
+    item = _clip_item(
+        "sess_001",
+        **TRANSITION,
+        **{ATTR_JINGLE_BEFORE_MODE: "no_post", ATTR_JINGLE_AFTER_MODE: "never"},
+    )
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert item.extra_attributes[ATTR_JINGLE] == opener
+
+
 async def test_a_news_section_can_go_without_its_jingle() -> None:
     """'never' leaves even the news bare."""
     renderer = DummyRenderer()

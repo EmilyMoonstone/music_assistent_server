@@ -239,8 +239,10 @@ JINGLE_FILE_EXTENSIONS = frozenset(
 )
 MAX_JINGLE_TEXT_CHARS = 300
 # a section's say on the jingle ahead of and after its break: "auto" leaves it to the host
-# (and, for the one after, to the LLM), "always" and "never" settle it
-JINGLE_SLOT_MODES = ("auto", "always", "never")
+# (and, for the one after, to the LLM), "always" and "never" settle it. "no_post" plays it
+# every time the voice cannot talk over the song instead: over the outro of the one before
+# for the opener, over the intro of the one after (a post) for the closer
+JINGLE_SLOT_MODES = ("auto", "always", "never", "no_post")
 DEFAULT_JINGLE_SLOT_MODE = "auto"
 # a break closes with a jingle of its own accord at most this often, in minutes per host
 DEFAULT_JINGLE_AFTER_GAP_MINUTES = 30

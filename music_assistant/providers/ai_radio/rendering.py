@@ -978,14 +978,15 @@ class AIRadioRenderMixin:
         occasion = self._jingle_occasion_of(queue_item, news, prompt)
         before = self._jingle_candidates(queue_item, host_id, effects, occasion)
         after, after_always = self._after_jingle_candidates(queue_item, host_id, effects, occasion)
-        # the song's timing only matters to a closing jingle that is still to be decided
-        vocal_onset = (
-            await self._next_vocal_onset(queue_item) if after and not after_always else None
+        # the song's timing only matters to a closing jingle a post may still take over from
+        open_to_post = bool(after) and (
+            not after_always or _jingle_mode(queue_item, ATTR_JINGLE_AFTER_MODE) == "no_post"
         )
+        vocal_onset = await self._next_vocal_onset(queue_item) if open_to_post else None
         # a break that can carry over the song's intro does that rather than close with a
         # jingle, which would keep it off the intro
-        if after and not after_always and self._post_fits(queue_item, vocal_onset):
-            after = []
+        if open_to_post and self._post_fits(queue_item, vocal_onset):
+            after, after_always = [], False
         # everything is decided in the call that writes the script, so it costs no extra
         # request, only the few lines listing the jingles
         ask_llm = bool(before or after) and effects.get("jingle_selection") == "ai"
@@ -1043,9 +1044,10 @@ class AIRadioRenderMixin:
         if not effects.get("jingles"):
             return []
         mode = _jingle_mode(queue_item, ATTR_JINGLE_BEFORE_MODE)
-        if mode == "never":
+        # a break that starts over the song before it has that song's outro for an opener
+        if mode == "never" or (mode == "no_post" and self._talk_over_fits(queue_item)):
             return []
-        always = mode == "always"
+        always = mode in ("always", "no_post")
         # news, weather and a show's ends always get theirs, a plain transition only now and
         # then, unless its section asks for one every time
         chance = coerce_int(effects.get("jingle_chance"), 0)
@@ -1072,7 +1074,8 @@ class AIRadioRenderMixin:
         mode = _jingle_mode(queue_item, ATTR_JINGLE_AFTER_MODE)
         if mode == "never":
             return [], False
-        always = mode == "always"
+        # "no_post" closes with one for sure unless a post takes its place, see _plan_jingles
+        always = mode in ("always", "no_post")
         if not always:
             next_item = self.mass.player_queues.get_next_item(
                 queue_item.queue_id, queue_item.queue_item_id
@@ -1133,6 +1136,16 @@ class AIRadioRenderMixin:
         if (max_overlap := coerce_float(host_effects.get("post_max_seconds"), 0.0)) > 0:
             window = min(window, max_overlap)
         return window
+
+    def _talk_over_fits(self, queue_item: QueueItem) -> bool:
+        """
+        Return whether a break is set to start over the outro of the song before it.
+
+        Without the talk-over support no break does, so an opener is never held back for one.
+
+        :param queue_item: The clip to look at.
+        """
+        return False
 
     def _next_track_genres(self, queue_item: QueueItem) -> set[str]:
         """Return the lowercase genres of the track after a clip, empty when unknown."""

@@ -380,6 +380,9 @@ def test_normalize_section_keeps_its_jingle_modes() -> None:
 
     assert normalized["jingle_before"] == "always"
     assert normalized["jingle_after"] == "never"
+    assert storage._normalize_section({**base, "jingle_after": "no_post"})["jingle_after"] == (
+        "no_post"
+    )
     assert "jingle_before" not in plain
     assert "jingle_after" not in plain
     with pytest.raises(InvalidDataError, match="invalid jingle_after"):
