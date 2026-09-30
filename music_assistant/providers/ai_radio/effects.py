@@ -140,6 +140,8 @@ def merge_jingle_modes(modes: list[str]) -> str:
     """
     if "always" in modes:
         return "always"
+    if "no_post" in modes:
+        return "no_post"
     if modes and all(mode == "never" for mode in modes):
         return "never"
     return DEFAULT_JINGLE_SLOT_MODE
