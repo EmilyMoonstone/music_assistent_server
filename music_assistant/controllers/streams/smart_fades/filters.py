@@ -275,6 +275,8 @@ class StreamingCrossfadeFilter(Filter):
         pre_crossfade_samples: int = 0,
         fadeout_curve: str = "qsin",
         fadein_curve: str = "qsin",
+        fadeout_duck: float | None = None,
+        duck_samples: int = 0,
     ):
         """
         Initialize streaming crossfade filter.
@@ -284,11 +286,17 @@ class StreamingCrossfadeFilter(Filter):
             untouched before the overlap begins.
         :param fadeout_curve: afade curve applied to the outgoing stream.
         :param fadein_curve: afade curve applied to the incoming stream.
+        :param fadeout_duck: Fraction of the outgoing stream's level to remove over the
+            overlap instead of fading it out: it dips over ``duck_samples``, stays down and
+            only fades out over the last ``duck_samples``. None fades it out as usual.
+        :param duck_samples: Length of the dip and of the closing fade of a ducked overlap.
         """
         self.crossfade_samples = crossfade_samples
         self.pre_crossfade_samples = pre_crossfade_samples
         self.fadeout_curve = fadeout_curve
         self.fadein_curve = fadein_curve
+        self.fadeout_duck = fadeout_duck
+        self.duck_samples = duck_samples
         super().__init__(logger)
 
     def apply(self, input_fadein_label: str, input_fadeout_label: str) -> list[str]:
@@ -298,19 +306,52 @@ class StreamingCrossfadeFilter(Filter):
         fadeout_chain = f"afade=t=out:start_sample={pre}:nb_samples={ns}:curve={self.fadeout_curve}"
         fadein_chain = f"afade=t=in:start_sample=0:nb_samples={ns}:curve={self.fadein_curve}"
         if pre:
-            fadeout_chain += f",atrim=end_sample={pre + ns}"
             fadein_chain += f",adelay={pre}S:all=1"
         # equal-power qsin curves; the default tri/tri dips ~3dB mid-fade on uncorrelated
         # material. The final output stays unlabeled: this filter ends the chain and an
         # unconnected named output fails the whole graph.
+        if self.fadeout_duck is None:
+            if pre:
+                fadeout_chain += f",atrim=end_sample={pre + ns}"
+            fadeout = [f"{input_fadeout_label}{fadeout_chain}[xfade_out]"]
+        else:
+            fadeout = self._ducked_fadeout(input_fadeout_label)
         return [
-            f"{input_fadeout_label}{fadeout_chain}[xfade_out]",
+            *fadeout,
             f"{input_fadein_label}{fadein_chain}[xfade_in]",
             "[xfade_out][xfade_in]amix=inputs=2:normalize=0",
         ]
 
+    def _ducked_fadeout(self, input_fadeout_label: str) -> list[str]:
+        """Return the chain that dips the outgoing stream under the overlap, see __init__."""
+        ns = self.crossfade_samples
+        pre = self.pre_crossfade_samples
+        depth = min(1.0, max(0.0, self.fadeout_duck or 0.0))
+        dip = min(self.duck_samples, ns // 2)
+        # the stream is the sum of a part that stays and a part that fades out over the dip,
+        # which lands it on the ducked level sample-exactly, with no level expression
+        kept = f"volume={round(1 - depth, 4)}"
+        dipped = (
+            f"volume={round(depth, 4)},"
+            f"afade=t=out:start_sample={pre}:nb_samples={max(1, dip)}:curve={self.fadeout_curve}"
+        )
+        # what is left of the stream at the end of the overlap fades out instead of stopping
+        closing = f"afade=t=out:start_sample={pre + ns - dip}:nb_samples={max(1, dip)}"
+        return [
+            f"{input_fadeout_label}asplit=2[duck_keep_in][duck_dip_in]",
+            f"[duck_keep_in]{kept}[duck_keep]",
+            f"[duck_dip_in]{dipped}[duck_dip]",
+            f"[duck_keep][duck_dip]amix=inputs=2:normalize=0,{closing},"
+            f"atrim=end_sample={pre + ns}[xfade_out]",
+        ]
+
     def __repr__(self) -> str:
         """Return string representation of StreamingCrossfadeFilter."""
+        if self.fadeout_duck is not None:
+            return (
+                f"StreamingCrossfade(pre={self.pre_crossfade_samples}, "
+                f"ns={self.crossfade_samples}, duck={self.fadeout_duck})"
+            )
         if self.pre_crossfade_samples:
             return (
                 f"StreamingCrossfade(pre={self.pre_crossfade_samples}, ns={self.crossfade_samples})"

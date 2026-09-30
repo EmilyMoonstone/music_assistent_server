@@ -55,6 +55,7 @@ class SmartFadesMixer:
         fade_out_data: bytes,
         fade_in_bytes_len: int,
         fade_in: bool = True,
+        duck_depth: float | None = None,
     ) -> SmartFade:
         """
         Pick the SmartFade implementation, prime its filters, and return it.
@@ -72,6 +73,8 @@ class SmartFadesMixer:
         :param fade_out_data: PCM buffer of the outgoing track's tail.
         :param fade_in_bytes_len: Expected length in bytes of the fade-in input.
         :param fade_in: False keeps the incoming audio at full level under a standard fade.
+        :param duck_depth: Level fraction a standard fade holds the outgoing audio down by
+            instead of fading it out, None for an ordinary fade.
         """
         # degradation chain: smart-crossfade → standard; richer modes prepend their builder
         smart_fade: SmartFade | None = None
@@ -92,6 +95,7 @@ class SmartFadesMixer:
                 standard_crossfade_duration=standard_crossfade_duration,
                 fade_out_analysis=fade_out_analysis,
                 fade_in=fade_in,
+                duck_depth=duck_depth,
             )
         return smart_fade
 
@@ -153,6 +157,7 @@ class SmartFadesMixer:
         standard_crossfade_duration: float,
         fade_out_analysis: AudioAnalysisData | None = None,
         fade_in: bool = True,
+        duck_depth: float | None = None,
     ) -> StandardCrossFade:
         """
         Build a StandardCrossFade — the tail of the degradation chain, never fails.
@@ -167,6 +172,7 @@ class SmartFadesMixer:
         :param fade_out_analysis: Outgoing analysis retained from a failed smart
             build, or ``None`` for the regular standard path.
         :param fade_in: False keeps the incoming audio at full level while the tail fades.
+        :param duck_depth: Level fraction the tail is held down by instead of fading out.
         """
         trailing_silence_bytes = 0
         try:
@@ -192,6 +198,7 @@ class SmartFadesMixer:
             crossfade_duration=standard_crossfade_duration,
             trailing_silence_bytes=trailing_silence_bytes,
             fade_in=fade_in,
+            duck_depth=duck_depth,
         )
         smart_fade.build(len(fade_out_data) - trailing_silence_bytes, fade_in_bytes_len, pcm_format)
         self.logger.debug(

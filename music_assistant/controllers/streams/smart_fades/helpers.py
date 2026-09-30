@@ -11,6 +11,10 @@ if TYPE_CHECKING:
 # Buffer size in seconds for crossfade analysis
 SMART_CROSSFADE_DURATION = 45
 
+# How long the track before dips under a plugin item that ducks it (see LeadIn), and how
+# long what is left of it fades out at the end of the overlap
+LEAD_IN_DUCK_SECONDS = 0.8
+
 # Below this many seconds of audible tail there is no room to place a musical
 # blend; the planner degrades such a boundary to a standard fade.
 MIN_EFFECTIVE_FADE_BUFFER = 8.0

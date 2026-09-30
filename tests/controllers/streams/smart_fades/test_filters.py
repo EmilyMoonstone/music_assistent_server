@@ -83,6 +83,45 @@ def test_streaming_crossfade_positions_the_blend() -> None:
     ]
 
 
+def test_streaming_crossfade_ducks_instead_of_fading_out() -> None:
+    """
+    A ducked overlap dips the outgoing stream to a level, holds it and fades it out last.
+
+    The stream is split into a part that stays and a part that fades out over the dip,
+    so the level lands exactly on the ducked one; what is left fades out at the very end.
+    """
+    crossfade = StreamingCrossfadeFilter(
+        logger=LOGGER,
+        crossfade_samples=441000,
+        pre_crossfade_samples=44100,
+        fadein_curve="nofade",
+        fadeout_duck=0.6,
+        duck_samples=35280,
+    )
+    filter_strings = crossfade.apply("[fadein]", "[fadeout]")
+    assert filter_strings == [
+        "[fadeout]asplit=2[duck_keep_in][duck_dip_in]",
+        "[duck_keep_in]volume=0.4[duck_keep]",
+        "[duck_dip_in]volume=0.6,afade=t=out:start_sample=44100:nb_samples=35280:curve=qsin"
+        "[duck_dip]",
+        "[duck_keep][duck_dip]amix=inputs=2:normalize=0,"
+        "afade=t=out:start_sample=449820:nb_samples=35280,atrim=end_sample=485100[xfade_out]",
+        "[fadein]afade=t=in:start_sample=0:nb_samples=441000:curve=nofade,"
+        "adelay=44100S:all=1[xfade_in]",
+        "[xfade_out][xfade_in]amix=inputs=2:normalize=0",
+    ]
+
+
+def test_a_short_ducked_overlap_keeps_its_dip_inside_it() -> None:
+    """The dip and the closing fade never take more than half of the overlap each."""
+    crossfade = StreamingCrossfadeFilter(
+        logger=LOGGER, crossfade_samples=1000, fadeout_duck=0.5, duck_samples=35280
+    )
+    filter_strings = crossfade.apply("[fadein]", "[fadeout]")
+    assert "nb_samples=500:curve=qsin" in filter_strings[2]
+    assert "afade=t=out:start_sample=500:nb_samples=500" in filter_strings[3]
+
+
 class TestShelfFilter:
     """asendcmd-driven shelving EQ on one stream, passthrough on the other."""
 
