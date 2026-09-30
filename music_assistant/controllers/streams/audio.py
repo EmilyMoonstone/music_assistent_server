@@ -2197,6 +2197,7 @@ class StreamsAudio:
                         fade_out_data=fade_out_data,
                         fade_in_bytes_len=fade_in_buffer_size,
                         fade_in=next_lead_in.fade_in if next_lead_in else True,
+                        duck_depth=next_lead_in.duck_depth if next_lead_in else None,
                     )
                     # the mixer degrades to a standard fade when the smart one cannot be planned
                     applied_mode = (
@@ -2639,6 +2640,7 @@ class StreamsAudio:
                         collect_resident = incoming_audio_buffer.duration_available
                         applied_mode = transition_mode
                         build_started = asyncio.get_event_loop().time()
+                        lead_in = self.plugin_lead_in(queue_track)
                         crossfade_smart_fade = await self.smart_fades_mixer.build(
                             fade_in_streamdetails=queue_track.streamdetails,
                             fade_out_streamdetails=last_streamdetails,
@@ -2647,11 +2649,8 @@ class StreamsAudio:
                             mode=transition_mode,
                             fade_out_data=last_fadeout_part,
                             fade_in_bytes_len=incoming_crossfade_size,
-                            fade_in=(
-                                lead_in.fade_in
-                                if (lead_in := self.plugin_lead_in(queue_track))
-                                else True
-                            ),
+                            fade_in=lead_in.fade_in if lead_in else True,
+                            duck_depth=lead_in.duck_depth if lead_in else None,
                         )
                         build_seconds = asyncio.get_event_loop().time() - build_started
                         timing_info = crossfade_smart_fade.timing_info

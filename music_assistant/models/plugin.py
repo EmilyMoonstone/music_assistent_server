@@ -83,6 +83,9 @@ class LeadIn:
     # False starts the plugin's item at full level while the track before fades out under it
     # (a talk-up over the outro); True fades it in as an ordinary crossfade does
     fade_in: bool = True
+    # fraction of the track's level removed under the item for the whole overlap, as a
+    # voice talking over an outro wants it; None fades the track out over the overlap
+    duck_depth: float | None = None
 
 
 class PluginProvider(Provider):

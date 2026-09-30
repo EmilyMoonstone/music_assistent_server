@@ -196,3 +196,17 @@ def test_a_talk_up_keeps_the_incoming_item_at_full_level(fade_in: bool, curve: s
 
     assert f"afade=t=in:start_sample=0:nb_samples=144000:curve={curve}" in chain[1]
     assert "curve=qsin" in chain[0]
+
+
+def test_a_talk_over_ducks_the_track_before_for_the_whole_overlap() -> None:
+    """A lead-in with a duck depth holds the outgoing tail down instead of fading it out."""
+    fade = StandardCrossFade(MagicMock(), crossfade_duration=10, fade_in=False, duck_depth=0.6)
+    fade.build(PCM.pcm_sample_size * 10, PCM.pcm_sample_size * 10, PCM)
+
+    chain = fade.filters[0].apply("[in]", "[out]")
+
+    assert "[duck_keep_in]volume=0.4[duck_keep]" in chain
+    # the dip and the closing fade take LEAD_IN_DUCK_SECONDS at 48 kHz
+    assert "afade=t=out:start_sample=0:nb_samples=38400:curve=qsin" in chain[2]
+    assert "afade=t=out:start_sample=441600:nb_samples=38400" in chain[3]
+    assert "curve=nofade" in chain[-2]

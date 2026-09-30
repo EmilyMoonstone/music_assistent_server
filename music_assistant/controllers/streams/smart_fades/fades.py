@@ -16,7 +16,10 @@ from music_assistant.controllers.streams.smart_fades.filters import (
     Filter,
     StreamingCrossfadeFilter,
 )
-from music_assistant.controllers.streams.smart_fades.helpers import SMART_CROSSFADE_DURATION
+from music_assistant.controllers.streams.smart_fades.helpers import (
+    LEAD_IN_DUCK_SECONDS,
+    SMART_CROSSFADE_DURATION,
+)
 from music_assistant.controllers.streams.smart_fades.models import (
     CrossfadeTimingInfo,
     SmartFadeNotApplicable,
@@ -360,6 +363,7 @@ class StandardCrossFade(SmartFade):
         crossfade_duration: float = 10.0,
         trailing_silence_bytes: int = 0,
         fade_in: bool = True,
+        duck_depth: float | None = None,
     ) -> None:
         """
         Initialize StandardCrossFade.
@@ -370,11 +374,14 @@ class StandardCrossFade(SmartFade):
             ``apply()`` slices off before crossfading.
         :param fade_in: False plays the incoming audio at full level from its first sample
             while the outgoing audio fades out under it.
+        :param duck_depth: Fraction of the outgoing audio's level removed for the whole
+            overlap, which then only fades out at its very end; None fades it out.
         """
         super().__init__(logger)
         self.crossfade_duration = crossfade_duration
         self.trailing_silence_bytes = trailing_silence_bytes
         self.fade_in = fade_in
+        self.duck_depth = duck_depth
         self.crossfade_size: int = 0
 
     def build(
@@ -411,6 +418,8 @@ class StandardCrossFade(SmartFade):
                 logger=self.logger,
                 crossfade_samples=crossfade_samples,
                 fadein_curve="qsin" if self.fade_in else "nofade",
+                fadeout_duck=self.duck_depth,
+                duck_samples=int(pcm_format.sample_rate * LEAD_IN_DUCK_SECONDS),
             ),
         ]
 
